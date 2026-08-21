@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import { validateNormalizedRecord } from '../../hooks/normalized-record.mjs';
 import { EVENT_TYPES } from '../../experience/audio/event-registry.mjs';
 import { recordsToNormalized as ccToNorm }   from '../../hooks/adapters/claude-code.mjs';
+import { recordsToNormalized as codexToNorm } from '../../hooks/adapters/codex.mjs';
 import { recordsToNormalized as piToNorm }   from '../../hooks/adapters/pi.mjs';
 import { recordsToNormalized as agToNorm }   from '../../hooks/adapters/antigravity.mjs';
 import { recordsToNormalized as grokToNorm } from '../../hooks/adapters/grok.mjs';
@@ -28,6 +29,7 @@ import { recordsToNormalized as cmdToNorm }  from '../../hooks/adapters/command-
 
 const ADAPTERS = {
   'claude-code': ccToNorm,
+  'codex':       codexToNorm,
   'pi':          piToNorm,
   'antigravity': agToNorm,
   'grok':        grokToNorm,
@@ -95,6 +97,69 @@ const GOLDEN = {
       },
     },
     { type: 'totally-new-record-type', timestamp: 't9' },
+  ],
+
+  'codex': [
+    {
+      timestamp: '2026-08-21T19:00:00.000Z',
+      type: 'session_meta',
+      payload: {
+        id: '01abc000-0000-7000-8000-000000000001',
+        cwd: '/Users/vinayakarora/Documents/GitHub/kaaroSessions',
+        cli_version: '0.148.0-alpha.9',
+        originator: 'codex_work_desktop',
+        model: 'gpt-5.5',
+        git: { branch: 'main' },
+      },
+    },
+    {
+      timestamp: '2026-08-21T19:00:01.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Show me this Codex task clearly' }],
+      },
+    },
+    {
+      timestamp: '2026-08-21T19:00:02.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'I will inspect the project.' }],
+      },
+    },
+    {
+      timestamp: '2026-08-21T19:00:03.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        name: 'exec_command',
+        call_id: 'call_1',
+        arguments: '{"cmd":"git status","workdir":"/Users/vinayakarora/Documents/GitHub/kaaroSessions"}',
+      },
+    },
+    {
+      timestamp: '2026-08-21T19:00:04.000Z',
+      type: 'response_item',
+      payload: { type: 'function_call_output', call_id: 'call_1', output: 'Process exited with code 0' },
+    },
+    {
+      timestamp: '2026-08-21T19:00:05.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          last_token_usage: {
+            input_tokens: 100,
+            output_tokens: 40,
+            cached_input_tokens: 10,
+            cache_write_input_tokens: 5,
+          },
+        },
+      },
+    },
   ],
 
   'pi': [
