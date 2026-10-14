@@ -15,6 +15,9 @@ import { join } from 'node:path';
 import { createRequestHandler } from '../surface/http-routes.mjs';
 import { createHub } from '../surface/sse-hub.mjs';
 import { createActiveState, applyPulse } from '../surface/active-state.mjs';
+import { renderKindMapPage, renderKindMapSnippet } from '../experience/kind-map-widget.mjs';
+import { tokensToCss } from '../experience/design-tokens.mjs';
+import { streamEvents } from '../hooks/pulse-map.mjs';
 
 function makeDeps(over = {}) {
   const hub = createHub();
@@ -32,6 +35,12 @@ function makeDeps(over = {}) {
     },
     resolveSessionFile: () => null,
     buildTrace: () => null,
+    renderKindMapPage: (payload) => renderKindMapPage(payload, {
+      tokensCss: tokensToCss(),
+      live: true,
+      streamEvents: [...streamEvents()],
+    }),
+    renderKindMapSnippet,
     ...over,
   };
 }
@@ -105,6 +114,61 @@ test('GET /api/signals — empty payload (200) when file absent', async () => {
   });
 });
 
+test('GET /api/kind-map — generated payload, no adapter leak', async () => {
+  await withServer(makeDeps(), async (base) => {
+    const r = await fetch(`${base}/api/kind-map`);
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.ok(Array.isArray(body.harnesses) && body.harnesses.length >= 1);
+    assert.ok(Array.isArray(body.kinds) && body.kinds.length >= 1);
+    assert.equal(body.harnesses[0].adapter, undefined);
+    assert.ok(body.kinds.every(k => Array.isArray(k.emit)));
+    assert.ok(Array.isArray(body.unknowns));
+  });
+});
+
+test('GET /api/kind-map — uses kindMapStore snapshot when provided', async () => {
+  const kindMapStore = {
+    snapshot: () => ({ generated_at: 'live', harnesses: [], kinds: [{ id: 'x', emit: [] }], tools: [] }),
+  };
+  await withServer(makeDeps({ kindMapStore }), async (base) => {
+    const body = await (await fetch(`${base}/api/kind-map`)).json();
+    assert.equal(body.generated_at, 'live');
+    assert.equal(body.kinds[0].id, 'x');
+  });
+});
+
+test('GET /mapping — 503 when renderer is not injected', async () => {
+  await withServer(makeDeps({ renderKindMapPage: undefined, renderKindMapSnippet: undefined }), async (base) => {
+    const r = await fetch(`${base}/mapping`);
+    assert.equal(r.status, 503);
+  });
+});
+
+test('GET /mapping — generated kind-map widget', async () => {
+  await withServer(makeDeps(), async (base) => {
+    const r = await fetch(`${base}/mapping`);
+    assert.equal(r.status, 200);
+    const html = await r.text();
+    assert.ok(html.includes('k-kind-map'));
+    assert.ok(html.includes('Kind × harness') || html.includes('kind'));
+    assert.ok(html.includes('?partial=1'));
+    assert.ok(!html.includes('function paint('));
+    assert.ok(html.includes('EventSource'));
+  });
+});
+
+test('GET /mapping?partial=1 — snippet only, same widget', async () => {
+  await withServer(makeDeps(), async (base) => {
+    const r = await fetch(`${base}/mapping?partial=1`);
+    assert.equal(r.status, 200);
+    const html = await r.text();
+    assert.ok(html.includes('k-kind-map'));
+    assert.ok(!html.includes('<!DOCTYPE html>'));
+    assert.ok(!html.includes('EventSource'));
+  });
+});
+
 test('GET /api/harnesses — registry descriptors as the UI source of truth', async () => {
   await withServer(makeDeps(), async (base) => {
     const r = await fetch(`${base}/api/harnesses`);
@@ -155,15 +219,16 @@ test('GET /api/trace/:id — 400 empty, 404 unresolved, 404 trace-incapable, 200
     assert.equal((await fetch(`${base}/api/trace/unknown-id`)).status, 404);
   });
 
-  // trace-incapable harness (antigravity: degenerate turns) → 404 + explanation
+  // trace-incapable harness → 404 + explanation
   const incapable = makeDeps({
-    resolveSessionFile: () => ({ filePath: 'f', projectId: 'p', sessionId: 's', harness: 'antigravity' }),
+    resolveSessionFile: () => ({ filePath: 'f', projectId: 'p', sessionId: 's', harness: 'tokenless' }),
   });
   await withServer(incapable, async (base) => {
     const r = await fetch(`${base}/api/trace/s`);
     assert.equal(r.status, 404);
     assert.ok((await r.text()).includes('not supported'));
   });
+
 
   const capable = makeDeps({
     resolveSessionFile: () => ({ filePath: 'f', projectId: 'p', sessionId: 's', harness: 'claude-code' }),
@@ -173,6 +238,25 @@ test('GET /api/trace/:id — 400 empty, 404 unresolved, 404 trace-incapable, 200
     const r = await fetch(`${base}/api/trace/s`);
     assert.equal(r.status, 200);
     assert.equal((await r.json()).ai_title, 'T');
+  });
+});
+
+test('GET /api/trace/:id — passes the resolved full session id (not the URL slug) to buildTrace', async () => {
+  // Regression: a caller pasting the 8-char slug shown by the graph/Mission
+  // Control must reconstruct the trace for the *resolved* session, not the slug.
+  let receivedSessionId = null;
+  const deps = makeDeps({
+    resolveSessionFile: (id) => ({ filePath: 'f', projectId: 'p', sessionId: 'full-session-id-0123456789', harness: 'claude-code' }),
+    buildTrace: (filePath, projectId, sessionId) => {
+      receivedSessionId = sessionId;
+      return { session_id: sessionId, ai_title: 'T', segments: [] };
+    },
+  });
+  await withServer(deps, async (base) => {
+    const r = await fetch(`${base}/api/trace/01a03426`);
+    assert.equal(r.status, 200);
+    assert.equal(receivedSessionId, 'full-session-id-0123456789');
+    assert.equal((await r.json()).session_id, 'full-session-id-0123456789');
   });
 });
 
@@ -231,6 +315,20 @@ test('GET / — falls back to the graph while home is not built yet', async () =
     deps.paths.html = join(dir, 'graph.html');
     await withServer(deps, async (base) => {
       assert.ok((await (await fetch(`${base}/`)).text()).includes('GRAPH PAGE'));
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('GET /daw — serves DAW page; query string does not 404', async () => {
+  const dir = join(tmpdir(), 'kaaro-daw-' + Date.now());
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'daw-builder.html'), '<html>DAW PAGE</html>', 'utf8');
+  try {
+    const deps = makeDeps();
+    deps.paths.daw = join(dir, 'daw-builder.html');
+    await withServer(deps, async (base) => {
+      assert.ok((await (await fetch(`${base}/daw`)).text()).includes('DAW PAGE'));
+      assert.ok((await (await fetch(`${base}/daw?x=1`)).text()).includes('DAW PAGE'));
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

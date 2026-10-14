@@ -3,6 +3,12 @@ const projPos = {};
 function seedPositions(graphData) {
   const pnodes = graphData.nodes.filter(n => n.type === 'project');
   pnodes.forEach((p, i) => {
+    // Already positioned (live sim state carried over by updateGraph, or a prior
+    // seed) — refresh the anchor cache from it but don't clobber x/y/fx/fy.
+    // Free-layout mode relies on this: otherwise every live update snaps
+    // projects back to their original ring position. restoreForceLayout()
+    // owns fx/fy for the current profile after this runs.
+    if (p.x != null) { projPos[p.id] = { x: p.x, y: p.y }; return; }
     if (projPos[p.id]) { p.x = projPos[p.id].x; p.y = projPos[p.id].y; }
     else { const a = (i / pnodes.length) * 2 * Math.PI - Math.PI / 2; p.x = W*.5 + 240*Math.cos(a); p.y = H*.5 + 210*Math.sin(a); }
     p.fx = p.x; p.fy = p.y; projPos[p.id] = { x: p.x, y: p.y };
@@ -42,12 +48,22 @@ function getForceParams() {
 function makeForceLink(edges, membershipStrength = 0.65) {
   const p = getForceParams();
   return d3.forceLink(edges != null ? edges : GRAPH.edges).id(d=>d.id)
-    .distance(d=>d.type==='membership'? p.membershipDist :d.type==='bundle'?45:d.type==='branch'?95:d.type==='read'?80: p.fileDist)
-    .strength(d=>d.type==='membership'? membershipStrength :d.type==='bundle'?.5:d.type==='branch'?.15:d.type==='read'?.08:.3);
+    .distance(d=>d.type==='membership'? p.membershipDist
+      :d.type==='bundle'?45
+      :d.type==='spawn'?36
+      :d.type==='branch'?95
+      :d.type==='read'?80
+      : p.fileDist)
+    .strength(d=>d.type==='membership'? membershipStrength
+      :d.type==='bundle'?.5
+      :d.type==='spawn'?.35
+      :d.type==='branch'?.15
+      :d.type==='read'?.08
+      :.3);
 }
 
 const simulation = d3.forceSimulation(GRAPH.nodes)
   .force('link',      makeForceLink())
-  .force('charge',    d3.forceManyBody().strength(d=>d.type==='project'?-700:d.type==='cluster'?-300:d.type==='session'?-130:-55))
+  .force('charge',    d3.forceManyBody().strength(d=>d.type==='project'?-700:d.type==='cluster'?-300:d.type==='session'?-130:d.type==='subagent'?-40:-55))
   .force('collision', d3.forceCollide(d=>nodeRadius(d)+4).strength(0.85))
-  .alphaDecay(0.006).velocityDecay(0.38);
+  .alphaDecay(SIM_ALPHA_DECAY).velocityDecay(0.38);

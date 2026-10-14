@@ -83,14 +83,36 @@ export const HARNESS_REGISTRY = [
     capabilities: {
       tokens: true, pulse: true, trace: true,
       context_resets: true, ai_title: true, subagent_count: true, branches: true,
+      subagent_tree: true,
       size_proxy: 'tokens_work',
     },
     watch: {
-      matchLogFile: (rel) => rel.replace(/\\/g, '/').endsWith('.jsonl'),
+      matchLogFile: (rel) => {
+        const p = rel.replace(/\\/g, '/');
+        if (p.endsWith('.jsonl')) return true;
+        // Sidechain meta: proj/<parent>/subagents/agent-*.meta.json
+        if (p.endsWith('.meta.json') && p.includes('/subagents/')) return true;
+        return false;
+      },
       ctxFromPath(relPath) {
         const parts = relPath.replace(/\\/g, '/').split('/');
         if (parts.length < 2) return null;
         const project_id = parts[0];
+        // Nested sidechain: proj/<parent>/subagents/agent-*.{jsonl,meta.json} → parent
+        if (parts.length >= 4 && parts[2] === 'subagents') {
+          const parent_id = parts[1];
+          const leaf = parts[3]
+            .replace(/\.meta\.json$/i, '')
+            .replace(/\.jsonl$/i, '')
+            .replace(/^agent-/, '');
+          return {
+            harness: 'claude-code', session_id: parent_id,
+            slug: parent_id.slice(0, 8), project_id,
+            project_label: deriveLabel(project_id),
+            agent_id: leaf,
+          };
+        }
+        if (!parts[1].endsWith('.jsonl')) return null;
         const session_id = parts[1].replace(/\.jsonl$/, '');
         return {
           harness: 'claude-code', session_id,
@@ -100,7 +122,13 @@ export const HARNESS_REGISTRY = [
       },
       rebuildArg(relPath) {
         const parts = relPath.replace(/\\/g, '/').split('/');
-        return parts.length === 2 ? `--session=${parts[0]}/${parts[1]}` : null;
+        if (parts.length === 2 && parts[1].endsWith('.jsonl'))
+          return `--session=${parts[0]}/${parts[1]}`;
+        // Sidechain jsonl or meta → rebuild parent session jsonl
+        if (parts.length >= 4 && parts[2] === 'subagents') {
+          return `--session=${parts[0]}/${parts[1]}.jsonl`;
+        }
+        return null;
       },
     },
   },
@@ -113,7 +141,7 @@ export const HARNESS_REGISTRY = [
     readSessionRecords: readJsonlRecords,
     roots: [CODEX_HOME_ROOT],
     capabilities: {
-      tokens: true, pulse: true, trace: true,
+      tokens: true, pulse: true, trace: true, // tokens are output-only (input/cache are per-request context-window snapshots, not per-turn deltas — see docs/CODEX.md)
       context_resets: false, ai_title: true, subagent_count: false, branches: true,
       size_proxy: 'tokens_work',
     },
@@ -178,12 +206,12 @@ export const HARNESS_REGISTRY = [
     readSessionRecords: readJsonlRecords,
     roots: [ANTIGRAVITY_BRAIN_ROOT],
     capabilities: {
-      // trace stays false: antigravity NRs carry no assistant text/thinking
-      // blocks, so reconstructed turns are degenerate (tool lists only).
-      tokens: false, pulse: true, trace: false,
-      context_resets: false, ai_title: false, subagent_count: false, branches: false,
+      tokens: false, pulse: true, trace: true,
+      context_resets: true, ai_title: true, subagent_count: true, branches: false,
       size_proxy: 'tool_calls',
     },
+
+
     watch: {
       matchLogFile: (rel) => {
         const n = rel.replace(/\\/g, '/');
@@ -203,7 +231,15 @@ export const HARNESS_REGISTRY = [
           project_label: 'antigravity',
         };
       },
-      rebuildArg: () => null,
+      rebuildArg: (relPath) => {
+        const parts = relPath.replace(/\\/g, '/').split('/');
+        const convIdx = parts.findIndex((p, i) =>
+          parts[i + 1] === '.system_generated' && parts[i + 2] === 'logs'
+        );
+        if (convIdx < 0) return null;
+        return `--session=antigravity/${parts[convIdx]}`;
+      },
+
     },
   },
   {

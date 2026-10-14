@@ -9,7 +9,7 @@ It is intended to be **self-growing**: when adding or discovering differences fo
 | Harness       | ID            | Root (default)                  | Tokens | Pulse (live) | Trace (/api/trace) | Notes / Quirks |
 |---------------|---------------|---------------------------------|--------|--------------|--------------------|---------------|
 | Claude Code   | `claude-code` | `~/.claude/projects/`           | Yes    | Yes          | Yes                | Full optional fields (context_resets, ai_title, subagent_count, branches). `turn_duration` provides authoritative `message_count`, `slug`, `duration_ms`. |
-| Codex         | `codex`       | `$CODEX_HOME` or `~/.codex/`    | Yes    | Yes          | Yes                | Dated rollout JSONL under `sessions/YYYY/MM/DD/`. Thread titles from `session_index.jsonl`; project attribution from `session_meta.cwd`; tool calls/results from `response_item` function calls. Watches active rollout files live. See [CODEX.md](./CODEX.md). |
+| Codex         | `codex`       | `$CODEX_HOME` or `~/.codex/`    | Partial | Yes         | Yes                | Dated rollout JSONL under `sessions/YYYY/MM/DD/`. Thread titles from `session_index.jsonl`; project attribution from `session_meta.cwd`; tool calls/results from `response_item` function calls. Real CLI tool name is `shell_command` (bash-aliased); `exec_command` kept as a legacy alias. Tokens = output only — `last_token_usage.input_tokens`/`cached_input_tokens` are the whole context window as of that turn, not a per-turn delta, so summing them across turns would explode; see [CODEX.md](./CODEX.md#token-handling). Watches active rollout files live. See [CODEX.md](./CODEX.md). |
 | Pi            | `pi`          | (via `PI_SESSIONS_ROOT`)        | Yes    | Yes          | No                 | Optionals declared `false` in registry are data-absent in Pi's raw format (only `session`/`model_change`/`thinking_level_change`/`message` record types exist — verified 2026-07-19). `thinking_level_change` maps to a `mode_shift` NR. Usage may be absent on some messages (guarded). |
 | Antigravity   | `antigravity` | `~/.gemini/antigravity/brain/`  | No     | Yes          | No                 | Tokenless (size_proxy = tool_calls). No project_id (always null). Uses `transcript.jsonl` (preferred) or `overview.txt`. |
 | Grok          | `grok`        | (via `GROK_SESSIONS_ROOT`)      | No     | Yes          | Yes                | Tokenless (size_proxy = tool_calls). Streaming chunks: dedup on `turnStartMs` when present; content blocks for text handled separately. Rich meta from summary/signals. |
@@ -65,6 +65,50 @@ See `hooks/adapters/*.mjs` + `hooks/session-reducer.mjs` and the Architecture No
 6. Add a golden fixture to `test/adapters/nr-compliance.test.mjs` + update `test/harness-registry.test.mjs`, `test/analyze-orchestrator.test.mjs`, `test/http-routes.test.mjs`, and this matrix.
 
 The goal is that a new harness feels like a localized, obvious addition with minimal cross-file churn — see `notes/crystallized/harness-architecture.md` for a fully worked example (Command Code).
+
+## Source Data Retention (why history disappears)
+
+kaaroSessions only reads whatever transcripts a harness still has on disk — it has no
+storage of its own (`sessions-data.json`/`graph-data.json` are regenerated from scratch
+on every `analyze.mjs` run, gitignored, never a historical archive). If a harness deletes
+its own old transcripts, they vanish from the graph too, with no warning.
+
+**Claude Code prunes its own history.** `~/.claude/projects/**/*.jsonl` is swept by a
+built-in background job controlled by the `cleanupPeriodDays` setting (introduced in CC
+v0.2.117; scope expanded in v2.1.117 to also cover `~/.claude/tasks/`,
+`~/.claude/shell-snapshots/`, `~/.claude/backups/`). **Default is 30 days** — any session
+transcript whose file hasn't been written to in 30+ days gets deleted automatically to
+cap disk usage. The clock is keyed off the file's last-modified time, not the session's
+original start date, so a session you keep resuming stays alive indefinitely; a session
+you touch once and never resume ages out a month later.
+
+This is not a kaaroSessions bug and not a recent change — it's been there almost since
+CC's beginning. It's just easy to not notice until the graph looks sparser than expected.
+
+**To change it:** add to `~/.claude/settings.json` (global) or a project's `.claude/settings.json`:
+
+```json
+{
+  "cleanupPeriodDays": 365
+}
+```
+
+`cleanupPeriodDays: 0` is rejected by CC with a validation error (it used to silently
+disable transcript persistence entirely — don't rely on that). Pick a number of days
+generous enough that you won't mind the loss.
+
+**Confirmed 2026-08-24** (this repo's dev machine): live claude-code sessions only went
+back to 2026-07-16 despite ~5 months of actual usage. The gap was recovered by discovering
+`~/.claude` was itself a manually-`git init`'d + pushed repo with periodic snapshot
+commits — those blobs held 95 sessions (2026-03-21 → 2026-05-07) that had already aged
+out of the live directory. If you want a durable safety net beyond raising
+`cleanupPeriodDays`, periodically committing `~/.claude` to a **private** git remote is
+one option — but audit `.gitignore` first: `.credentials.json` (live OAuth token) and
+`sessions/*.key` have no business in git history and were found tracked unprotected
+during that investigation.
+
+Other harnesses' retention behavior is currently undocumented/unverified — treat "the
+graph only shows what's still on disk" as a general caveat, not a claude-code-specific one.
 
 ## Known Gaps / Future
 

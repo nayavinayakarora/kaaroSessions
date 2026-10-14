@@ -5,6 +5,7 @@
  */
 
 import { categorizeBash } from '../helpers/analyze-helpers.mjs';
+import { isBashToolName } from '../action-keys.mjs';
 
 const HARNESS = 'codex';
 
@@ -51,6 +52,25 @@ function hasFailureText(output = '') {
   return /\b(error|failed|exception|traceback)\b/i.test(text);
 }
 
+// apply_patch's raw input is a diff-DSL string, not a structured object —
+// e.g. "*** Begin Patch\n*** Update File: a.mjs\n@@\n...\n*** End Patch".
+// Extract every touched path so file_ops can credit all of them.
+function filesFromPatch(patchText) {
+  const text = String(patchText || '');
+  return [...text.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map(m => m[1].trim());
+}
+
+// custom_tool_call_output wraps its result in a JSON string with a
+// metadata.exit_code — check that before falling back to text sniffing.
+function patchOutputFailed(output) {
+  const raw = String(output || '');
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.metadata?.exit_code === 'number') return parsed.metadata.exit_code !== 0;
+  } catch { /* not JSON — fall through */ }
+  return hasFailureText(raw);
+}
+
 function tokenUsage(payload = {}) {
   const usage = payload.info?.last_token_usage || null;
   if (!usage) return null;
@@ -69,7 +89,6 @@ function tokenUsage(payload = {}) {
 export function recordsToNormalized(records) {
   const out = [];
   const toolByCallId = new Map();
-  let firstUserSeen = false;
   let lastBranch = null;
 
   for (const rec of records) {
@@ -110,12 +129,10 @@ export function recordsToNormalized(records) {
         const tokens = tokenUsage(payload);
         if (tokens) out.push({ kind: 'tokens', harness: HARNESS, ts, tokens });
       }
-      if (payload.type === 'agent_message' && payload.message) {
-        out.push({
-          kind: 'content_block', harness: HARNESS, ts,
-          block_type: 'text', text: String(payload.message),
-        });
-      }
+      // agent_message/user_message under event_msg duplicate response_item's
+      // message (role assistant/user) — verified byte-identical text, ~1ms
+      // apart, in live rollouts. response_item is the sole source of turn
+      // content; emitting both here would double every content_block:text.
       continue;
     }
 
@@ -126,11 +143,9 @@ export function recordsToNormalized(records) {
         const text = textFromContent(payload.content, new Set(['input_text']));
         const cleaned = stripInfrastructure(text);
         if (!cleaned) continue;
-        const firstText = !firstUserSeen && cleaned.length >= 8 ? cleaned : null;
-        if (firstText) firstUserSeen = true;
         out.push({
           kind: 'user_turn', harness: HARNESS, ts,
-          text: firstText,
+          text: cleaned.length >= 8 ? cleaned : null,
           display_text: cleaned.slice(0, 500),
         });
       } else if (payload.role === 'assistant') {
@@ -164,7 +179,7 @@ export function recordsToNormalized(records) {
       if (args.workdir && !input.path) input.path = args.workdir;
       const tool = payload.name || 'unknown';
       if (payload.call_id) toolByCallId.set(payload.call_id, tool);
-      const isShell = tool === 'exec_command' || tool === 'shell' || tool === 'bash';
+      const isShell = isBashToolName(tool);
       out.push({
         kind: 'tool_use', harness: HARNESS, ts,
         tool,
@@ -178,6 +193,36 @@ export function recordsToNormalized(records) {
     if (payload.type === 'function_call_output') {
       const tool = toolByCallId.get(payload.call_id) || 'unknown';
       const error = hasFailureText(payload.output);
+      const nr = {
+        kind: 'tool_result', harness: HARNESS, ts,
+        tool,
+        tool_id: payload.call_id || undefined,
+        error,
+      };
+      if (error) nr.error_text = String(payload.output || '').trim().slice(0, 300) || undefined;
+      out.push(nr);
+      continue;
+    }
+
+    // File edits never go through function_call — they're a separate
+    // custom_tool_call/custom_tool_call_output pair (verified against live
+    // rollouts). apply_patch is the only known name so far.
+    if (payload.type === 'custom_tool_call') {
+      const tool = payload.name || 'unknown';
+      if (payload.call_id) toolByCallId.set(payload.call_id, tool);
+      out.push({
+        kind: 'tool_use', harness: HARNESS, ts,
+        tool,
+        category: null,
+        tool_id: payload.call_id || undefined,
+        input: { paths: filesFromPatch(payload.input) },
+      });
+      continue;
+    }
+
+    if (payload.type === 'custom_tool_call_output') {
+      const tool = toolByCallId.get(payload.call_id) || 'unknown';
+      const error = patchOutputFailed(payload.output);
       const nr = {
         kind: 'tool_result', harness: HARNESS, ts,
         tool,

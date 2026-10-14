@@ -23,7 +23,7 @@
     { id: 'file',    label: 'File Ops', color: '#2a6a2a', tools: ['read', 'write', 'edit', 'grep_glob'] },
     { id: 'system',  label: 'System',   color: '#2a3a7a', tools: ['bash_git', 'bash_run', 'bash_other'] },
     { id: 'ai',      label: 'AI',       color: '#6a2a7a', tools: ['agent', 'other', 'web'] },
-    { id: 'context', label: 'Context',  color: '#2a5a6a', tools: ['tokens', 'words'] },
+    { id: 'context', label: 'Context',  color: '#2a5a6a', tools: ['tokens', 'words', 'thinking'] },
   ];
 
   const TOOL_FAMILY = {};
@@ -42,6 +42,7 @@
       human_turn: 'bell', compact: 'kick',
       permission: 'hat', mode_shift: 'hat',
       chirp: 'pling', attachment: 'pling', scaffold: 'hat',
+      thinking: 'bell',
     },
     scale:       'major_pentatonic',
     noteMode:    'path_hash',
@@ -151,6 +152,7 @@
     chirp:      { pan:  0.20, sendAmt: 0.10, brightness: 8000  },
     attachment: { pan:  0.25, sendAmt: 0.15, brightness: 6500  },
     scaffold:   { pan: -0.20, sendAmt: 0.05, brightness: 4000  },
+    thinking:   { pan: -0.10, sendAmt: 0.06, brightness: 4000  },
   };
   const HARNESS_PAN_BIAS = { pi: -0.15, antigravity: 0.15, grok: 0.25 };
 
@@ -172,6 +174,7 @@
     chirp:      { instrument: 'pling', octave:  1, volMult: 0.35 },
     attachment: { instrument: 'pling', octave:  0, volMult: 0.50 },
     scaffold:   { instrument: 'hat',   octave: -1, volMult: 0.40 },
+    thinking:   { instrument: 'bell',  octave: -1, volMult: 0.25 },
   };
 
   function resolveSonic(event, data) {
@@ -247,6 +250,9 @@
 
     const tmb = (P.timbre && P.timbre[instrument]) || {};
     const fam = key ? (TOOL_FAMILY[key] || null) : null;
+    if (instrument && instrument !== 'off' && !['harp','bass','bell','flute','bit','pling','snare','kick','hat','buzz'].includes(instrument)) {
+      instrument = ({ pad:'bell', click:'pling', chime:'bell', tick:'hat', woodblock:'pling', sweep:'kick' })[instrument] || 'harp';
+    }
     return { key, instrument, volMult, octave, degreeMode, scale, timbre: tmb, fam, pan, sendAmt, brightness };
   }
 
@@ -352,7 +358,8 @@
     return where ? strHash(where) % iv.length : 0;
   }
 
-  // ── Beat scheduler (80 ms batch coalescing) ───────────────────────────────────
+  // ── Beat scheduler ────────────────────────────────────────────────────────────
+  // 80 ms batch, then snap onto the next beat (musical grid).
   let _beatAt = 0, _barBeat = 0, _batchBuf = [], _batchTimer = null;
   const BATCH_MS = 80;
 
@@ -361,49 +368,65 @@
     if (!_batchBuf.length) return;
     const buf = _batchBuf.splice(0);
     const c   = ac(); if (!c) return;
-    const bd  = 60 / (window.AUDIO_SETTINGS.bpm || 120);
     const now = c.currentTime;
+    const scale = SCALES[window.AUDIO_SETTINGS?.scale] || SCALES.major_pentatonic;
+    const { audible } = (typeof coalesceVoices === 'function')
+      ? coalesceVoices(buf, { scale })
+      : { audible: buf };
+
+    const bd = 60 / (window.AUDIO_SETTINGS.bpm || 120);
     if (_beatAt < now + 0.02) { _beatAt = now + 0.02; _barBeat = 0; }
     const at = _beatAt;
     _barBeat = (_barBeat + 1) % (window.AUDIO_SETTINGS.beatsPerBar || 4);
     _beatAt += bd;
-    const stagger = Math.min(0.005, 0.04 / Math.max(1, buf.length - 1));
-    buf.forEach((fn, i) => fn(c, at + i * stagger));
-  }
 
-  function sched(fn) {
-    if (!ac()) return;
-    _batchBuf.push(fn);
-    if (!_batchTimer) _batchTimer = setTimeout(_flushBatch, BATCH_MS);
+    const stagger = Math.min(0.012, 0.04 / Math.max(1, audible.length - 1));
+    // Audio sink only: heardAt is the oscillator clock. The viz sink already
+    // owns the ring entry (arrival ts). Do not rewrite ts — that jumps the block.
+    for (const v of buf) {
+      if (v.meta?.ringEv) v.meta.ringEv.heardAt = at;
+    }
+    audible.forEach((v, i) => startVoice(c, at + i * stagger, v));
   }
 
   // ── Per-voice signal chain ────────────────────────────────────────────────────
-  // Mixer gains (set by module 19, defaulting to 1)
   window.MIXER_GAINS = { file: 1, system: 1, ai: 1, context: 1 };
+  window._scheduledVoices = [];
+  window._getAudioNow = () => (_ac ? _ac.currentTime : 0);
 
-  function schedVoice(name, hz, vol, sonic) {
+  function schedVoice(name, hz, vol, sonic, meta) {
     const mixerGain = (window.MIXER_GAINS && sonic.fam) ? (window.MIXER_GAINS[sonic.fam] ?? 1) : 1;
     const finalVol  = (vol != null ? vol : 0.42) * mixerGain;
-    sched((c, at) => {
-      if (!_masterGain) return;
-      // Brightness filter
-      const filt = c.createBiquadFilter(); filt.type = 'lowpass';
-      filt.frequency.value = sonic.brightness || 10000; filt.Q.value = 0.8;
-      // Stereo panner (graceful fallback for very old Safari)
-      let panner = null;
-      try { panner = c.createStereoPanner(); panner.pan.value = sonic.pan || 0; } catch {}
-      const endpoint = panner || _masterGain;
-      filt.connect(endpoint);
-      if (panner) panner.connect(_masterGain);
-      // Reverb send
-      if ((sonic.sendAmt || 0) > 0.01 && _reverbConvolver) {
-        const sg = c.createGain(); sg.gain.value = sonic.sendAmt;
-        endpoint.connect(sg); sg.connect(_reverbConvolver);
-      }
-      // Instrument connects into brightness filter as its output node
-      const fn = INSTS[name] || harp;
-      PERC.has(name) ? fn(c, at, finalVol, filt) : fn(c, at, hz, finalVol, filt);
+    _batchBuf.push({ name, hz, vol: finalVol, sonic, meta });
+    if (!ac()) return; // viz already has the pulse; no oscillator to arm
+    if (!_batchTimer) _batchTimer = setTimeout(_flushBatch, BATCH_MS);
+  }
+
+  function startVoice(c, at, v) {
+    if (!_masterGain) return;
+    const { name, hz, vol, sonic, meta } = v;
+    const filt = c.createBiquadFilter(); filt.type = 'lowpass';
+    filt.frequency.value = sonic?.brightness || 10000; filt.Q.value = 0.8;
+    let panner = null;
+    try { panner = c.createStereoPanner(); panner.pan.value = sonic?.pan || 0; } catch {}
+    const endpoint = panner || _masterGain;
+    filt.connect(endpoint);
+    if (panner) panner.connect(_masterGain);
+    if ((sonic?.sendAmt || 0) > 0.01 && _reverbConvolver) {
+      const sg = c.createGain(); sg.gain.value = sonic.sendAmt;
+      endpoint.connect(sg); sg.connect(_reverbConvolver);
+    }
+    const fn = INSTS[name] || harp;
+    PERC.has(name) ? fn(c, at, vol, filt) : fn(c, at, hz, vol, filt);
+
+    const voices = window._scheduledVoices;
+    voices.push({
+      at, dur: INST_DUR[name] || 0.4,
+      instrument: name, hz, key: sonic?.key, fam: sonic?.fam,
+      label: meta?.label || name, relMs: meta?.relMs, event: meta?.event,
+      clusterN: v.clusterN,
     });
+    if (voices.length > 48) voices.shift();
   }
 
   // ── Click track ───────────────────────────────────────────────────────────────
@@ -558,6 +581,10 @@
   const INSTS = { harp, bass, bell, flute, bit, pling, snare, kick, hat, buzz };
   window.INSTS = INSTS;
   const PERC  = new Set(['snare', 'kick', 'hat']);
+  const INST_DUR = {
+    harp: 0.9, bass: 1.4, bell: 2.5, flute: 0.65, bit: 0.22, pling: 0.48,
+    snare: 0.12, kick: 0.25, hat: 0.04, buzz: 0.27,
+  };
 
   window.previewInstrument = function (name) {
     const fn = INSTS[name]; if (!fn) return;
@@ -579,18 +606,23 @@
     if (_pressureTickCount % 10 === 0) _updatePressure();
   }
 
-  // ── Main pulse dispatcher ─────────────────────────────────────────────────────
+  // ── Client dispatcher: encode once, fan out to independent sinks ───────────
   // Cognition events ride the same ring + audio path: structural/human signals
   // with registry-defined sonic profiles (W-COG surfacing).
   const COGNITION_EVENTS = new Set([
     'human_turn', 'compact', 'permission', 'mode_shift',
     'tool_error', 'api_error', 'chirp', 'attachment', 'scaffold',
+    'thinking', 'unknown',
   ]);
 
   window.playPulse = function (event, data) {
+    let ringEv = null;
+    let r = null;
+
+    // PROCESS: encode. Viz and audio both read this object; neither produces the other.
     try {
       if (event === 'tool_call' || event === 'words' || event === 'tokens' || COGNITION_EVENTS.has(event)) {
-        const sonic = resolveSonic(event, data);
+        r = resolveSonic(event, data);
 
         // Track cache ratios for pressure
         if (event === 'tokens') {
@@ -608,7 +640,7 @@
           return total > 0 ? (data.cache_read || 0) / total : 0;
         })();
 
-        _pushToBeatRing({
+        ringEv = {
           ts:          Date.now(),
           color:       projNode?.color || '#334466',
           label:       event === 'tool_call' ? (data.tool || 'tool') : event,
@@ -620,23 +652,32 @@
           where:       data.where     || null,
           category:    data.category  || null,
           preview:     data.preview   || null,
-          key:         sonic.key,
-          family:      sonic.fam,
+          relMs:       data.relMs     != null ? data.relMs : null,
+          key:         r.key,
+          family:      r.fam,
           output:      data.output    || 0,
           input:       data.input     || 0,
           cache_read:  data.cache_read || 0,
           word_count:  data.word_count || 0,
           cache_ratio: cacheRatio,
-          pan:         sonic.pan,
-          brightness:  sonic.brightness,
-        });
+          pan:         r.pan,
+          brightness:  r.brightness,
+        };
+        // VIZ SINK — arrival clock. Independent of mute and AudioContext.
+        _pushToBeatRing(ringEv);
       }
     } catch {}
 
     if (muted) return;
     try {
       const S = window.AUDIO_SETTINGS;
-      const r = resolveSonic(event, data);
+      if (!r) r = resolveSonic(event, data);
+      const meta = {
+        ringEv,
+        label: ringEv?.label,
+        relMs: data.relMs,
+        event,
+      };
 
       if (event === 'tool_call') {
         if (!passesFilter(r.key, data.project)) return;
@@ -645,14 +686,14 @@
         if (r.degreeMode && r.degreeMode !== oldMode) S.noteMode = r.degreeMode;
         const hz = noteHz(data.project, getDegree(data.where), r.octave || 0);
         if (r.degreeMode && r.degreeMode !== oldMode) S.noteMode = oldMode;
-        schedVoice(name, hz, r.volMult !== 1 ? 0.42 * r.volMult : undefined, r);
+        schedVoice(name, hz, r.volMult !== 1 ? 0.42 * r.volMult : undefined, r, meta);
 
       } else if (event === 'tokens') {
         if (!passesFilter('tokens', data.project)) return;
         const name = r.instrument; if (name === 'off') return;
         const hz  = noteHz(data.project, 0, r.octave ?? -1);
         const vol = Math.min(0.11, 0.04 + Math.log1p((data.output || 0) / 300) * 0.028);
-        schedVoice(name, hz, vol * r.volMult, r);
+        schedVoice(name, hz, vol * r.volMult, r, meta);
 
       } else if (event === 'words') {
         if (!passesFilter('words', data.project)) return;
@@ -660,13 +701,13 @@
         const iv  = SCALES[r.scale] || activeIv();
         const deg = Math.min(iv.length - 1, Math.floor((data.word_count || 0) / 15));
         const hz  = noteHz(data.project, deg, r.octave ?? 1);
-        schedVoice(name, hz, 0.11 * r.volMult, r);
+        schedVoice(name, hz, 0.11 * r.volMult, r, meta);
 
       } else if (COGNITION_EVENTS.has(event)) {
         if (!passesFilter(r.key, data.project)) return;
         const name = r.instrument; if (name === 'off') return;
         const hz = noteHz(data.project, 0, r.octave || 0);
-        schedVoice(name, hz, 0.12 * r.volMult, r);
+        schedVoice(name, hz, 0.12 * r.volMult, r, meta);
       }
     } catch { /* audio must never break UI */ }
   };

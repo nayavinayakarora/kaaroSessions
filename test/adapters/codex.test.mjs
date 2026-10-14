@@ -103,3 +103,135 @@ test('Codex adapter ignores cumulative token totals as per-event signal', () => 
 
   assert.equal(nrs.some(r => r.kind === 'tokens'), false);
 });
+
+test('Codex adapter categorizes real CLI shell_command tool name as bash (git)', () => {
+  // Real local Codex CLI (v0.147.0+) emits function_call name "shell_command",
+  // not "exec_command" — verified against live ~/.codex rollout transcripts.
+  const nrs = recordsToNormalized([
+    {
+      timestamp: '2026-08-29T10:49:30.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        name: 'shell_command',
+        call_id: 'call_1',
+        arguments: '{"command":"git status --short --branch","workdir":"D:\\\\src\\\\x"}',
+      },
+    },
+  ]);
+
+  const toolUse = nrs.find(r => r.kind === 'tool_use');
+  assert.equal(toolUse.tool, 'shell_command');
+  assert.equal(toolUse.category, 'git');
+});
+
+test('Codex adapter populates user_turn text on every qualifying turn, not just the first', () => {
+  const nrs = recordsToNormalized([
+    {
+      timestamp: '2026-08-29T10:49:21.000Z',
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'First prompt here' }] },
+    },
+    {
+      timestamp: '2026-08-29T10:55:59.000Z',
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Second prompt here too' }] },
+    },
+  ]);
+
+  const userTurns = nrs.filter(r => r.kind === 'user_turn');
+  assert.equal(userTurns.length, 2);
+  assert.equal(userTurns[0].text, 'First prompt here');
+  assert.equal(userTurns[1].text, 'Second prompt here too');
+});
+
+test('Codex adapter does not double-emit assistant text (event_msg/agent_message duplicates response_item/message)', () => {
+  // Verified against live ~/.codex rollouts: every assistant turn writes
+  // BOTH an event_msg/agent_message AND a response_item/message with the
+  // same text (1ms apart) — a real session showed exactly 2x as many
+  // content_block:text NRs as actual assistant turns before this fix.
+  const nrs = recordsToNormalized([
+    {
+      timestamp: '2026-08-29T10:00:00.000Z',
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: 'I will inspect the repo shape first.' },
+    },
+    {
+      timestamp: '2026-08-29T10:00:00.001Z',
+      type: 'response_item',
+      payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'I will inspect the repo shape first.' }] },
+    },
+  ]);
+
+  const textBlocks = nrs.filter(r => r.kind === 'content_block' && r.block_type === 'text');
+  assert.equal(textBlocks.length, 1, 'assistant text must be emitted exactly once, not once per channel');
+});
+
+test('Codex adapter maps custom_tool_call (apply_patch) to tool_use/tool_result — real file-edit channel', () => {
+  // Verified against live ~/.codex rollouts: file edits never go through
+  // function_call — they're a separate custom_tool_call/custom_tool_call_output
+  // pair. Without this, file_ops stayed empty for every real codex session,
+  // even ones with 100+ tool calls.
+  const nrs = recordsToNormalized([
+    {
+      timestamp: '2026-08-29T10:00:00.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call', status: 'completed', call_id: 'call_1', name: 'apply_patch',
+        input: '*** Begin Patch\n*** Update File: src/app.mjs\n@@\n-old\n+new\n*** End Patch',
+      },
+    },
+    {
+      timestamp: '2026-08-29T10:00:01.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call_output', call_id: 'call_1',
+        output: '{"output":"Success. Updated the following files:\\nM src/app.mjs\\n","metadata":{"exit_code":0}}',
+      },
+    },
+  ]);
+
+  const toolUse = nrs.find(r => r.kind === 'tool_use');
+  assert.equal(toolUse.tool, 'apply_patch');
+  assert.equal(toolUse.tool_id, 'call_1');
+  assert.deepEqual(toolUse.input.paths, ['src/app.mjs']);
+
+  const toolResult = nrs.find(r => r.kind === 'tool_result');
+  assert.equal(toolResult.tool_id, 'call_1');
+  assert.equal(toolResult.error, false);
+});
+
+test('Codex adapter extracts every path from a multi-file apply_patch call', () => {
+  const nrs = recordsToNormalized([{
+    timestamp: '2026-08-29T10:00:00.000Z',
+    type: 'response_item',
+    payload: {
+      type: 'custom_tool_call', status: 'completed', call_id: 'call_2', name: 'apply_patch',
+      input: '*** Begin Patch\n*** Update File: a.mjs\n@@\n-x\n+y\n*** Add File: b.mjs\n+z\n*** End Patch',
+    },
+  }]);
+
+  const toolUse = nrs.find(r => r.kind === 'tool_use');
+  assert.deepEqual(toolUse.input.paths, ['a.mjs', 'b.mjs']);
+});
+
+test('Codex adapter marks a failed apply_patch as a tool_result error', () => {
+  const nrs = recordsToNormalized([
+    {
+      timestamp: '2026-08-29T10:00:00.000Z',
+      type: 'response_item',
+      payload: { type: 'custom_tool_call', status: 'completed', call_id: 'call_3', name: 'apply_patch', input: '*** Begin Patch\n*** End Patch' },
+    },
+    {
+      timestamp: '2026-08-29T10:00:01.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call_output', call_id: 'call_3',
+        output: '{"output":"Error: context mismatch","metadata":{"exit_code":1}}',
+      },
+    },
+  ]);
+
+  const toolResult = nrs.find(r => r.kind === 'tool_result');
+  assert.equal(toolResult.error, true);
+});

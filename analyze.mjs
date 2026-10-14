@@ -16,13 +16,18 @@ import { fileURLToPath } from 'url';
 import { buildSessionsOutput } from './surface/analyze-orchestrator.mjs';
 import { recordsToNormalized } from './hooks/adapters/claude-code.mjs';
 import { reduceSession } from './hooks/session-reducer.mjs';
-import { enrichSession } from './hooks/enrich-session.mjs';
+import { enrichSession, enrichProject } from './hooks/enrich-session.mjs';
 import { loadPolicy } from './hooks/policy.mjs';
 import { buildSignalsData } from './hooks/signal-evaluator.mjs';
 import {
   deriveLabel, normPath, categorizeBash,
-  extractTextFromContent, extractSkills,
+  extractTextFromContent, extractSkills, canonicalProjectId,
 } from './hooks/helpers/analyze-helpers.mjs';
+import {
+  parentSessionDirFromLog,
+  listSubagentArtifacts,
+  stubRefsFromArtifacts,
+} from './hooks/helpers/subagent-discover.mjs';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +54,11 @@ function analyzeSession(projectId, filePath) {
   });
 
   session.tool_timeline = extractToolTimeline(records);
+  // Stubs only — sidechain transcripts must not become session nodes / rollup members
+  const stubs = stubRefsFromArtifacts(
+    listSubagentArtifacts(parentSessionDirFromLog(filePath)),
+  );
+  if (stubs.length) session.subagents = stubs;
   enrichSession(session);
   return session;
 }
@@ -183,15 +193,18 @@ export function parseSessionFlag(argv) {
 }
 
 export function mergeSessionIntoData(existingData, updatedSession) {
-  const projectId = updatedSession.project_id;
+  const projectId = canonicalProjectId(updatedSession.project_id);
 
   // Replace or append session
   const sessions = existingData.sessions.filter(s => s.session_id !== updatedSession.session_id);
   sessions.push(updatedSession);
 
-  // Rebuild project summary for the affected project only
-  const projectSessions = sessions.filter(s => s.project_id === projectId);
+  // Group by canonical id so live-tail matches buildSessionsOutput and keeps raw_ids complete.
+  const projectSessions = sessions.filter(s => canonicalProjectId(s.project_id) === projectId);
   const newProjectSummary = buildProjectSummary(projectId, projectSessions);
+  newProjectSummary.raw_ids   = [...new Set(projectSessions.map(s => s.project_id))].sort();
+  newProjectSummary.harnesses = [...new Set(projectSessions.map(s => s.harness))].sort();
+  enrichProject(newProjectSummary);
 
   const projects = existingData.projects
     .filter(p => p.id !== projectId)

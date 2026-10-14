@@ -11,6 +11,7 @@ import path from 'path';
 
 import { HARNESS_REGISTRY, getHarness } from '../hooks/registry.mjs';
 import { snapshotActive } from './active-state.mjs';
+import { buildKindMap } from './kind-map-build.mjs';
 
 const JSON_HEADERS = {
   'Content-Type': 'application/json', 'Cache-Control': 'no-cache',
@@ -25,11 +26,15 @@ const JSON_HEADERS = {
  * @param {{ root: string, html: string, data: string, daw: string, now: string }} deps.paths
  * @param {(sessionId: string) => object|null} deps.resolveSessionFile
  * @param {(filePath: string, projectId: string|null, sessionId: string, harness: string) => object|null} deps.buildTrace
+ * @param {{ snapshot: Function }} [deps.kindMapStore]
+ * @param {(payload: object) => string} [deps.renderKindMapPage] — experience widget; injected by serve.mjs
+ * @param {(payload: object) => string} [deps.renderKindMapSnippet]
  * @returns {(req: import('http').IncomingMessage, res: import('http').ServerResponse) => void}
  */
-export function createRequestHandler({ hub, activeState, getStatus, paths, resolveSessionFile, buildTrace }) {
+export function createRequestHandler({ hub, activeState, getStatus, paths, resolveSessionFile, buildTrace, kindMapStore = null, renderKindMapPage, renderKindMapSnippet } = {}) {
   return (req, res) => {
-    if (req.url === '/events') {
+    const pathOnly = req.url.split('?')[0];
+    if (pathOnly === '/events') {
       hub.addClient(res, req);
       return;
     }
@@ -69,6 +74,26 @@ export function createRequestHandler({ hub, activeState, getStatus, paths, resol
 
     // Registry as the experience layer's source of truth: id, label,
     // capabilities only (watch config / adapters are backend-internal).
+    if (req.url === '/api/kind-map') {
+      res.writeHead(200, JSON_HEADERS);
+      res.end(JSON.stringify(kindMapStore ? kindMapStore.snapshot() : buildKindMap()));
+      return;
+    }
+
+    if (pathOnly === '/mapping' || pathOnly === '/kind-map') {
+      const payload = kindMapStore ? kindMapStore.snapshot() : buildKindMap();
+      const partial = /(?:\?|&)partial=1(?:&|$)/.test(req.url);
+      const render = partial ? renderKindMapSnippet : renderKindMapPage;
+      if (typeof render !== 'function') {
+        res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('kind map renderer missing');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(render(payload));
+      return;
+    }
+
     if (req.url === '/api/harnesses') {
       res.writeHead(200, JSON_HEADERS);
       res.end(JSON.stringify({
@@ -88,7 +113,7 @@ export function createRequestHandler({ hub, activeState, getStatus, paths, resol
       if (!harness?.capabilities?.trace) {
         res.writeHead(404); res.end('trace not supported for this harness'); return;
       }
-      const tree = buildTrace(found.filePath, found.projectId, sessionId, found.harness);
+      const tree = buildTrace(found.filePath, found.projectId, found.sessionId, found.harness);
       if (!tree) { res.writeHead(500); res.end('reconstruction failed'); return; }
       res.writeHead(200, JSON_HEADERS);
       res.end(JSON.stringify(tree));
@@ -114,7 +139,7 @@ export function createRequestHandler({ hub, activeState, getStatus, paths, resol
     }
 
     // ── Dedicated Live Pulse DAW Builder (pure event stream, no graph) ─────────
-    if (req.url === '/daw' || req.url === '/daw-builder' || req.url === '/audio' || req.url === '/builder') {
+    if (pathOnly === '/daw' || pathOnly === '/daw-builder' || pathOnly === '/audio' || pathOnly === '/builder') {
       if (!fs.existsSync(paths.daw)) {
         res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end('<html><body style="font:14px monospace;padding:40px;background:#080810;color:#9aa0b8"><h2>DAW Builder not built yet</h2><p>Run <code>node build.mjs</code> (or the serve will trigger a build on next request in future).</p><p><a href="/graph" style="color:#ff6600">Back to the graph</a></p></body></html>');
