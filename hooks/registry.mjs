@@ -146,9 +146,11 @@ export const HARNESS_REGISTRY = [
       size_proxy: 'tokens_work',
     },
     watch: {
+      pollIntervalMs: 1000,
+      pollRoots: ['sessions', 'archived_sessions'],
       matchLogFile(rel) {
         const n = rel.replace(/\\/g, '/');
-        return /^sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-.*\.jsonl$/.test(n);
+        return /^(?:sessions\/\d{4}\/\d{2}\/\d{2}|archived_sessions)\/rollout-.*\.jsonl$/.test(n);
       },
       ctxFromPath(relPath) {
         const n = relPath.replace(/\\/g, '/');

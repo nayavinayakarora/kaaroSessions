@@ -20,6 +20,7 @@ import { fileURLToPath }  from 'url';
 
 import { getEnabledHarnesses } from './hooks/registry.mjs';
 import { processWatchFilename } from './surface/watch-handlers.mjs';
+import { createPollWatcher } from './surface/poll-watcher.mjs';
 import { resolveSessionFile, invalidateSessionResolveCache } from './surface/session-resolver.mjs';
 import { createActiveState } from './surface/active-state.mjs';
 import { createHub } from './surface/sse-hub.mjs';
@@ -72,7 +73,7 @@ const activeState = createActiveState();
 const kindMapStore = createKindMapStore({
   buildBaseline: () => buildKindMap({ local: true, eventTypes: EVENT_TYPES }),
 });
-const { tailAndPulse } = createPulseEmitter({ hub, activeState, kindMap: kindMapStore });
+const { tailAndPulse, primeFile } = createPulseEmitter({ hub, activeState, kindMap: kindMapStore });
 
 // ── Rebuild pipeline ──────────────────────────────────────────────────────────
 
@@ -130,6 +131,19 @@ for (const harness of getEnabledHarnesses()) {
     watchCount++;
   } catch (e) {
     console.warn(`[${harness.id}] watch unavailable: ${e.message}`);
+  }
+  if (harness.watch.pollIntervalMs && fs.existsSync(root)) {
+    for (const subdir of harness.watch.pollRoots || ['.']) {
+      const pollRoot = path.join(root, subdir);
+      createPollWatcher({
+        root: pollRoot,
+        intervalMs: harness.watch.pollIntervalMs,
+        matchLogFile: rel => harness.watch.matchLogFile(path.join(subdir, rel)),
+        onInitial: rel => primeFile(path.join(pollRoot, rel)),
+        onChange: rel => handleWatchEvent(harness.id, root, path.join(subdir, rel)),
+      });
+    }
+    console.log(`Polling [${harness.id}] for missed file notifications`);
   }
 }
 

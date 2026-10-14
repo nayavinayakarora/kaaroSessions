@@ -31,6 +31,10 @@ When Codex task files change, `kaaro-sessions` tails the new JSONL records,
 emits live SSE pulses for `/now` and `/daw`, then schedules the normal
 debounced graph rebuild.
 
+Codex rollout directories are also checked every second as a fallback for
+missed recursive file-watch notifications. Existing files start at their current
+end, so restarting the server does not replay old activity as live pulses.
+
 ## Storage Layout
 
 Codex writes dated rollout files:

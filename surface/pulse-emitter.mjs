@@ -102,5 +102,10 @@ export function createPulseEmitter({ hub, activeState, kindMap = null, nowThrott
     } catch { /* tail errors must not affect the main rebuild flow */ }
   }
 
-  return { tailAndPulse };
+  function primeFile(filePath) {
+    if (offsetMap.has(filePath)) return;
+    try { offsetMap.set(filePath, fs.statSync(filePath).size); } catch { /* file may move during startup */ }
+  }
+
+  return { tailAndPulse, primeFile };
 }
