@@ -15,6 +15,8 @@ import {
 
 let root;
 const SESSION_ID = '01abc000-0000-7000-8000-000000000001';
+const INDEX_ONLY_ID = '01abc000-0000-7000-8000-000000000002';
+const ARCHIVED_ID = '01abc000-0000-7000-8000-000000000003';
 
 function jsonl(records) {
   return records.map(r => JSON.stringify(r)).join('\n') + '\n';
@@ -26,6 +28,8 @@ before(() => {
   fs.mkdirSync(dayDir, { recursive: true });
   fs.writeFileSync(path.join(root, 'session_index.jsonl'), jsonl([
     { id: SESSION_ID, thread_name: 'Make Kaarosessions audible', updated_at: '2026-08-21T19:00:00Z' },
+    { id: INDEX_ONLY_ID, thread_name: 'Index only Codex task', updated_at: '2026-08-22T09:30:00Z' },
+    { id: ARCHIVED_ID, thread_name: 'Archived Codex task', updated_at: '2026-08-20T09:30:00Z' },
   ]), 'utf8');
   fs.writeFileSync(path.join(dayDir, `rollout-2026-08-21T20-02-32-${SESSION_ID}.jsonl`), jsonl([
     {
@@ -59,6 +63,21 @@ before(() => {
       },
     },
   ]), 'utf8');
+
+  const archiveDir = path.join(root, 'archived_sessions');
+  fs.mkdirSync(archiveDir, { recursive: true });
+  fs.writeFileSync(path.join(archiveDir, `rollout-2026-08-20T10-00-00-${ARCHIVED_ID}.jsonl`), jsonl([
+    {
+      timestamp: '2026-08-20T09:00:00.000Z',
+      type: 'session_meta',
+      payload: {
+        id: ARCHIVED_ID,
+        cwd: '/Users/vinayakarora/Documents/Playground',
+        cli_version: '0.148.0-alpha.9',
+        model: 'gpt-5.5',
+      },
+    },
+  ]), 'utf8');
 });
 
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -86,11 +105,24 @@ test('analyzeCodexSession produces canonical session shape with index title', ()
   assert.ok(session.file_size_bytes > 0);
 });
 
-test('scanCodexSessions walks dated rollout tree and skips non-session jsonl', () => {
+test('scanCodexSessions walks dated and archived rollout files', () => {
   const result = scanCodexSessions(root);
   assert.equal(result.harness, 'codex');
-  assert.equal(result.sessions.length, 1);
-  assert.equal(result.sessions[0].session_id, SESSION_ID);
+  assert.ok(result.sessions.some(s => s.session_id === SESSION_ID));
+  assert.ok(result.sessions.some(s => s.session_id === ARCHIVED_ID));
+});
+
+test('scanCodexSessions includes metadata-only sessions from the index', () => {
+  const result = scanCodexSessions(root);
+  const session = result.sessions.find(s => s.session_id === INDEX_ONLY_ID);
+  assert.ok(session);
+  assert.equal(session.harness, 'codex');
+  assert.equal(session.source, 'codex');
+  assert.equal(session.metadata_only, true);
+  assert.equal(session.ai_title, 'Index only Codex task');
+  assert.equal(session.project_label, 'Index only Codex task');
+  assert.equal(session.tokens_work, 0);
+  assert.equal(session.tool_calls, 0);
 });
 
 test('scanCodexSessions returns null when root is missing', () => {

@@ -110,6 +110,7 @@ export function buildGraph(data, { minSessions = 1, referenceMs, clusterOverride
       ai_title:         sess.ai_title        || null,
       subagent_count:   sess.subagent_count  || 0,
       branches:         sess.branches        || [],
+      metadata_only:    sess.metadata_only   || false,
       tools_top:        _topTools(sess.tools),
       sizeNorm,
       errorLevel:       sess.tool_errors >= 8 ? 2 : sess.tool_errors >= 3 ? 1 : 0,

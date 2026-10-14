@@ -20,6 +20,15 @@ function sessionIdFromFilename(file) {
   return match ? match[1] : base.replace(/^rollout-[^-]+-/, '');
 }
 
+function slugFromTitle(title, fallback) {
+  return String(title || fallback || 'codex')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'codex';
+}
+
 function projectFromRecords(records) {
   const meta = records.find(r => r.type === 'session_meta')?.payload || {};
   const ctx = records.find(r => r.type === 'turn_context')?.payload || {};
@@ -87,15 +96,80 @@ function* rolloutFiles(root) {
       }
     }
   }
+
+  const archivedRoot = path.join(root, 'archived_sessions');
+  if (fs.existsSync(archivedRoot)) {
+    for (const file of fs.readdirSync(archivedRoot).filter(f => f.startsWith('rollout-') && f.endsWith('.jsonl')).sort()) {
+      yield path.join(archivedRoot, file);
+    }
+  }
+}
+
+function codexMetadataSession(rec) {
+  const title = rec.thread_name || rec.id;
+  const projectSlug = slugFromTitle(title, rec.id);
+  const session = {
+    session_id: rec.id,
+    project_id: `codex-index-${projectSlug}`,
+    project_label: title,
+    harness: 'codex',
+    source: 'codex',
+    ai_title: title,
+    slug: rec.id.slice(0, 8),
+    first_timestamp: rec.updated_at || null,
+    last_timestamp: rec.updated_at || null,
+    duration_ms: 0,
+    tokens: { input: 0, cache_create: 0, cache_read: 0, output: 0 },
+    tools: {},
+    file_ops: {},
+    skills: [],
+    builtin_commands: [],
+    bash_categories: {},
+    content_blocks: {},
+    stop_reasons: {},
+    branches: [],
+    skill_timeline: [],
+    skill_attribution: {},
+    tool_calls: 0,
+    tool_errors: 0,
+    message_count: 0,
+    user_turns: 0,
+    assistant_turns: 0,
+    context_resets: 0,
+    subagent_count: 0,
+    file_size_bytes: 0,
+    metadata_only: true,
+  };
+  enrichSession(session);
+  return session;
 }
 
 export function scanCodexSessions(root = CODEX_HOME_ROOT) {
   const titleIndex = readCodexSessionIndex(path.join(root, 'session_index.jsonl'));
+  const seenSessionIds = new Set();
   return walkSessions(root, 'codex', function* () {
     for (const filePath of rolloutFiles(root)) {
       yield {
         id: path.relative(root, filePath),
-        analyze: () => analyzeCodexSession(filePath, { root, titleIndex }),
+        analyze: () => {
+          const session = analyzeCodexSession(filePath, { root, titleIndex });
+          seenSessionIds.add(session.session_id);
+          return session;
+        },
+      };
+    }
+
+    const indexed = Object.values(titleIndex)
+      .sort((a, b) => String(a.updated_at || '') < String(b.updated_at || '') ? -1 : 1);
+    for (const rec of indexed) {
+      if (!rec?.id || seenSessionIds.has(rec.id)) continue;
+      yield {
+        id: `session_index.jsonl:${rec.id}`,
+        analyze: () => {
+          if (seenSessionIds.has(rec.id)) return null;
+          seenSessionIds.add(rec.id);
+          return codexMetadataSession(rec);
+        },
       };
     }
   });

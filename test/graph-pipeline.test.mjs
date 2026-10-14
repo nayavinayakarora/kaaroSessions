@@ -147,6 +147,7 @@ test('buildGraph — optional session fields pass through to nodes', async t => 
     subagent_count: 2,
     branches: ['main', 'feat/x'],
     tools: { Read: { calls: 7, errors: 0 }, Bash: { calls: 3, errors: 1 } },
+    metadata_only: true,
   });
   const result = buildGraph(d, { referenceMs: Date.now() });
   const s1 = result.nodes.find(n => n.id === 's1');
@@ -157,6 +158,7 @@ test('buildGraph — optional session fields pass through to nodes', async t => 
     assert.equal(s1.ai_title, 'Fix the auth flow');
     assert.equal(s1.subagent_count, 2);
     assert.deepEqual(s1.branches, ['main', 'feat/x']);
+    assert.equal(s1.metadata_only, true);
   });
 
   await t.test('absent optional fields default to 0/null/empty', () => {
@@ -164,6 +166,7 @@ test('buildGraph — optional session fields pass through to nodes', async t => 
     assert.equal(s2.ai_title, null);
     assert.equal(s2.subagent_count, 0);
     assert.deepEqual(s2.branches, []);
+    assert.equal(s2.metadata_only, false);
   });
 
   await t.test('tools_top is sorted by call count, name+calls shape', () => {
