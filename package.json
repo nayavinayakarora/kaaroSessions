@@ -1,18 +1,47 @@
 {
   "name": "kaaro-sessions",
-  "version": "0.9.0",
+  "version": "1.2.0",
   "type": "module",
   "description": "Live multi-harness AI coding session observability surface — a kaaroViewer companion tool",
   "keywords": ["claude-code", "sessions", "graph", "visualization", "d3", "observability", "multi-harness"],
+  "license": "AGPL-3.0-or-later",
+  "author": "karx",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/karx/kaaroSessions.git"
+  },
+  "homepage": "https://github.com/karx/kaaroSessions#readme",
+  "bugs": {
+    "url": "https://github.com/karx/kaaroSessions/issues"
+  },
   "engines": { "node": ">=18.0.0" },
   "bin": {
     "kaaro-sessions": "./serve.mjs"
   },
+  "files": [
+    "analyze.mjs",
+    "build.mjs",
+    "serve.mjs",
+    "hooks/",
+    "surface/",
+    "experience/",
+    "cluster-overrides.json",
+    "favicon.svg",
+    "og-image.png",
+    "site.webmanifest",
+    "robots.txt",
+    "generate-og-png.html"
+  ],
   "scripts": {
     "start":              "node serve.mjs",
     "analyze":            "node analyze.mjs",
     "build":              "node build.mjs",
     "test":               "node --test",
+    "package:check":      "npm pack --dry-run",
+    "release:pack":       "npm pack",
 
     "transcript":         "node scripts/sim-audio.mjs",
     "transcript:cc":      "node scripts/sim-audio.mjs --harness=cc",

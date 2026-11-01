@@ -1,8 +1,26 @@
 // ── Drag ──────────────────────────────────────────────────────────────────────
 const drag = d3.drag()
-  .on('start',(ev,d)=>{ if(!ev.active && currentLayout==='force') simulation.alphaTarget(.3).restart(); d.fx=d.x; d.fy=d.y; })
-  .on('drag', (ev,d)=>{ d.fx=ev.x; d.fy=ev.y; })
-  .on('end',  (ev,d)=>{ if(!ev.active && currentLayout==='force') simulation.alphaTarget(0); if(d.type!=='project'&&currentLayout==='force'){d.fx=null;d.fy=null;} });
+  .on('start',(ev,d)=>{
+    if(!ev.active && isSimLayout()) simulation.alphaTarget(.3).restart();
+    d.fx=d.x; d.fy=d.y; d._dragged=false;
+  })
+  .on('drag', (ev,d)=>{
+    d._dragged=true;
+    d.fx=ev.x; d.fy=ev.y;
+    if (d.type==='project') {
+      projPos[d.id]={ x:ev.x, y:ev.y };
+      if (currentLayout==='grid') window.drawGridDecor?.();
+    }
+  })
+  .on('end',  (ev,d)=>{
+    if(!ev.active && isSimLayout()) simulation.alphaTarget(0);
+    if (d.type==='project' && currentLayout==='grid' && d._dragged) {
+      window.seatGlyphAt?.(d.id, d.x, d.y);
+    } else if (d.type!=='project' && isSimLayout()) {
+      d.fx=null; d.fy=null;
+    }
+    d._dragged=false;
+  });
 
 // ── Tooltip ───────────────────────────────────────────────────────────────────
 const tip = document.getElementById('tip');
@@ -11,15 +29,21 @@ function attachTooltip(sel) {
   sel.on('mouseover',(ev,d)=>{
     tip.style.display='block';
     if (d.type==='project') {
+      const hs = d.harnesses || [];
       tip.innerHTML=`<strong style="color:${d.color}">${d.label}</strong>
-        <div class="meta">${d.session_count} sessions · AI work: ${fmtTok(d.tokens_work)}</div>
+        <div class="meta">${d.session_count} sessions · consumption: ${fmtTok(d.tokens_total)} · AI work: ${fmtTok(d.tokens_work)}</div>
+        ${hs.length?`<div class="meta">${hs.length} harness${hs.length===1?'':'es'} · ${hs.join(' · ')}</div>`:''}
         ${d.skills.length?'<div class="meta">/'+d.skills.join(' /')+'</div>':''}`;
+    } else if (d.type==='subagent') {
+      tip.innerHTML=`<strong style="color:${EDGE_COLORS.spawn}">↳ ${esc(d.agent_type||'subagent')}</strong>
+        <div class="meta">${esc((d.description||d.agent_id||'').slice(0,80))}</div>
+        <div class="meta">parent ${(d.parent_session_id||'').slice(0,8)}</div>`;
     } else if (d.type==='session') {
       tip.innerHTML=`<strong style="color:${d.color}">${d.label}</strong>
         <div class="meta">${d.date_str||'?'} · ${d.duration_min!=null?d.duration_min+'min':'?'} · ${d.model||'?'}</div>
         ${d.recencyLevel>0?'<div class="meta" style="color:'+(['','#446','#88a','#adf'][d.recencyLevel])+'">● '+(['','< 2 days','< 15 min','< 5 min'][d.recencyLevel])+'</div>':''}
         <div class="meta">branch: ${d.git_branch||'?'}</div>
-        <div class="meta">AI work: ${fmtTok(d.tokens_work)} · cache: ${fmtTok(d.tokens_cached)} (${d.cache_hit_rate}%)</div>
+        <div class="meta">consumption: ${fmtTok(d.tokens_total)} · AI work: ${fmtTok(d.tokens_work)} · cache: ${fmtTok(d.tokens_cached)} (${d.cache_hit_rate}%)</div>
         <div class="meta">${d.tool_calls} calls · ${d.tool_errors} errors · ${d.tool_diversity} tool types</div>
         ${d.thinking_count?'<div class="meta">thinking: '+d.thinking_count+'</div>':''}
         ${d.hit_max_tokens?'<div class="meta" style="color:#ff4444">⚠ hit max_tokens</div>':''}
@@ -90,7 +114,7 @@ function slHighlight(id) {
 function attachClick(sel) {
   sel.on('click',(ev,d)=>{
     ev.stopPropagation();
-    if (d.type==='cluster' && currentLayout==='force') {
+    if (d.type==='cluster' && isSimLayout()) {
       selectedId=d.id; highlight(d.id); showPanel(d); toggleCluster(d.id); return;
     }
     if(selectedId===d.id){selectedId=null;highlight(null);closePanel();}else{selectedId=d.id;highlight(d.id);showPanel(d);}
@@ -140,7 +164,7 @@ function focusNode(id) {
   selectedId = id;
   highlight(id);
   showPanel(node);
-  if (currentLayout === 'force' && node.x != null && node.y != null) {
+  if (isSimLayout() && node.x != null && node.y != null) {
     const k = d3.zoomTransform(svg.node()).k;
     svg.transition().duration(420).call(
       zoom.transform,
@@ -244,12 +268,30 @@ function showPanel(d) {
   const nb=neighbours(d.id); let html='';
   if (d.type==='project') {
     const ss=[...nb].filter(id=>id!==d.id).map(id=>nodeById[id]).filter(n=>n?.type==='session');
-    html=`<h3 style="color:${d.color}">${d.label}</h3>
+    const hRows = harnessBreakdown(d.harnesses, ss).map(h =>
+      `<div class="prow"><span class="pk" style="color:${h.color}">● ${esc(h.harness)}</span><span class="pv">${h.count}</span></div>`
+    ).join('');
+    html=`<div class="pglyph-hero">${projectGlyphSvg(d, { r: 28, bg: KAARO_TOKENS.bg })}</div>
+      <h3 style="color:${d.color}">${d.label}</h3>
       <div class="prow"><span class="pk">Sessions</span><span class="pv">${d.session_count}</span></div>
+      <div class="prow"><span class="pk">Consumption</span><span class="pv">${fmtTok(d.tokens_total)}</span></div>
       <div class="prow"><span class="pk">AI work</span><span class="pv">${fmtTok(d.tokens_work)}</span></div>
       <div class="prow"><span class="pk">Skills</span><span class="pv">${d.skills.map(s=>'<span class="ptag">/'+s+'</span>').join('')||'none'}</span></div>
+      ${hRows?`<div class="psep"></div><div class="p-section-hd">◆ HARNESSES</div>${hRows}`:''}
+      <button class="paction" data-share-project="${esc(d.id)}">◆ SHARE CARD</button>
       <div class="psep"></div>
       ${ss.map(s=>_nodeRow(s.id,`<span class="pk">${s.date_str||'?'}</span><span class="pv" style="color:${d.color}">${s.label}</span>`)).join('')}`;
+  } else if (d.type==='subagent') {
+    const parent = nodeById[d.parent_session_id];
+    const sc = EDGE_COLORS.spawn;
+    html=`<h3 style="color:${sc}">↳ ${esc(d.agent_type||'subagent')}</h3>
+      <div class="pai-title">${esc(d.description||d.agent_id||'')}</div>
+      <div class="prow"><span class="pk">Agent id</span><span class="pv">${esc(d.agent_id||'')}</span></div>
+      <div class="prow"><span class="pk">Parent</span><span class="pv">${esc(parent?.label||(d.parent_session_id||'').slice(0,8))}</span></div>
+      <div class="prow"><span class="pk">Linked</span><span class="pv">${d.linked===false?'no':'yes'}</span></div>
+      <div class="psep"></div>
+      ${d.parent_session_id?`<button class="paction paction-thread" data-thread-open="${esc(d.parent_session_id)}">◆ VIEW PARENT THREAD ▸</button>`:''}
+      ${parent?_nodeRow(parent.id,`<span class="pk">session</span><span class="pv" style="color:${parent.color}">${parent.label}</span>`):''}`;
   } else if (d.type==='session') {
     const files=[...nb].filter(id=>id!==d.id&&nodeById[id]?.type==='file').map(id=>nodeById[id]);
     const peers=[...nb].filter(id=>id!==d.id&&nodeById[id]?.type==='session').map(id=>nodeById[id]);
@@ -266,7 +308,14 @@ function showPanel(d) {
         :`<div class="prow"><span class="pk">Branch</span><span class="pv">${d.git_branch||'?'}</span></div>`}
       ${d.context_resets?`<div class="prow"><span class="pk">Context resets</span><span class="pv">${d.context_resets}</span></div>`:''}
       ${d.subagent_count?`<div class="prow"><span class="pk">Subagents</span><span class="pv">${d.subagent_count}</span></div>`:''}
+      ${(d.subagents&&d.subagents.length)?`<div class="psep"></div><div class="p-section-hd">◆ SUBAGENTS</div>`+
+        d.subagents.map(s=>`<div class="prow subagent-stub" data-thread-open="${esc(d.id)}" title="Open thread">`+
+          `<span class="pk" style="color:${EDGE_COLORS.spawn}">↳ ${esc(s.agent_type||'agent')}</span>`+
+          `<span class="pv" style="text-align:right">${esc((s.description||s.agent_id||'').slice(0,48))}</span>`+
+        `</div>`).join('')
+      :''}
       <div class="psep"></div>
+      <div class="prow"><span class="pk">Consumption</span><span class="pv">${fmtTok(d.tokens_total)}</span></div>
       <div class="prow"><span class="pk">AI work</span><span class="pv">${fmtTok(d.tokens_work)}</span></div>
       <div class="prow"><span class="pk">Cache read</span><span class="pv">${fmtTok(d.tokens_cached)} (${d.cache_hit_rate}%)</span></div>
       <div class="prow"><span class="pk">Output</span><span class="pv">${fmtTok(d.tokens_output)}</span></div>
@@ -284,8 +333,10 @@ function showPanel(d) {
       ${_toolBars(d)}
       ${window._traceSection ? window._traceSection(d) : ''}
       <div class="psep"></div>
-      ${d.context_resets ? `<button class="paction paction-thread" data-thread-open="${esc(d.id)}">◆ VIEW THREAD ▸</button>` : ''}
+      ${(d.context_resets || (d.subagents&&d.subagents.length) || TRACE_HARNESSES.has(d.harness))
+        ? `<button class="paction paction-thread" data-thread-open="${esc(d.id)}">◆ VIEW THREAD ▸</button>` : ''}
       <button class="paction" data-resume="${esc(d.id)}">◆ COPY RESUME PROMPT</button>
+      <button class="paction" data-share="${esc(d.id)}">◆ SHARE CARD</button>
       `;
   } else if (d.type==='cluster') {
     const members=(d.member_ids||[]).map(id=>nodeById[id]).filter(Boolean);

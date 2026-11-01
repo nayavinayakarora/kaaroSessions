@@ -273,6 +273,7 @@ How each harness feeds the fields that become `thr-turn-text`:
 | Harness | User `display_text` | User `text` (fallback) | Asst text source | Trace? |
 |---|---|---|---|---|
 | **claude-code** | Human text ≤500 from text blocks; hybrid text+tool_result keeps prose; tool-result-only → null | First user msg only (stripped) | `content_block` `block_type:'text'` | ✅ |
+| **codex** | Human `input_text` ≤500 after environment/plugin wrapper stripping | First user msg only | Assistant `output_text` and live `agent_message` → `content_block` text; reasoning → `thinking` | ✅ |
 | **command-code** | Same hybrid rules as CC | First user msg only | `text` + `reasoning`→`thinking` | ✅ |
 | **grok** | every user chunk ≤500 | ≤200 if ≥8 chars | `content_block` text with **`chunk:true`** | ✅ |
 | **opencode** | — | `firstText(_parts)` (capped in trace-tree) | Assistant parts → `content_block` text; reasoning → `thinking` | ✅ |
@@ -281,6 +282,8 @@ How each harness feeds the fields that become `thr-turn-text`:
 | **antigravity** | Minimal | — | No assistant text in NRs | ❌ `trace: false` |
 
 **Implication:** rich `.thr-turn-text` depends on adapters emitting either `display_text` (user) or `content_block` with `block_type:'text'` (assistant). Capability `trace: true` gates the endpoint; it does not guarantee full prose for every harness.
+
+Codex-specific trace details are documented in [CODEX.md](./CODEX.md#trace-support).
 
 ---
 
@@ -401,11 +404,12 @@ Nothing in this path mutates graph state. Live SSE pulses (`tool_call`, `words`,
 
 | Item | Status |
 |---|---|
-| Subagent nesting (Agent → child session tree) | Counted (`subagent_count`); not linked/loaded |
+| Subagent nesting (Agent → child session tree) | **CC linked/loaded** via `capabilities.subagent_tree`: discover flat `parent/subagents/agent-*` (siblings at any `spawnDepth` — not nested dirs) + meta.toolUseId, nest in `/api/trace` (`tree.subagents`, `turn.spawned_subagents`). Graph carries **stubs** + opt-in spawn satellites. Sidechains never enter the session scanner or rollups. |
 | Full tool result bodies in the thread | Only error flag + short `error_text` |
 | Write file content in tool rows | Stripped by `_sanitizeInput` |
 | Thinking prose in thr-turn-text | Thinking sets `has_thinking` badge only, not body text |
-| Graph-time precompute of segments | Still on-demand (`/api/trace`); graph only has `context_resets` count |
+| Graph-time precompute of segments | Still on-demand (`/api/trace`); graph has `context_resets` + subagent **stubs** (not full nested trees) |
+| Graph spawn edges / type:`subagent` nodes | **Shipped opt-in** (same as stubs row): `includeSubagentNodes` + **Subagent spawn edges** checkbox (default off). Ids `subagent:<parent>:<agentId>`; never type:`session`. |
 
 ---
 

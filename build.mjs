@@ -24,6 +24,9 @@ import { buildGraph } from './experience/graph-pipeline.mjs';
 import { validateClusterOverrides } from './experience/session-clusters.mjs';
 import { TOKENS, tokensToCss } from './experience/design-tokens.mjs';
 import { HARNESS_REGISTRY } from './hooks/registry.mjs';
+import { EVENT_TYPES } from './experience/audio/event-registry.mjs';
+import { renderKindMapPage } from './experience/kind-map-widget.mjs';
+import { buildKindMap } from './surface/kind-map-build.mjs';
 
 const CWD = path.dirname(fileURLToPath(import.meta.url));
 
@@ -58,7 +61,7 @@ export function applySubstitutions(template, subs) {
  * The core file's syntax contract: only `export function` / `export const`.
  */
 export function stripExports(src) {
-  return src.replace(/^export (function|const)/gm, '$1');
+  return src.replace(/^export (async function|function|const)/gm, '$1');
 }
 
 function loadClientCore() {
@@ -91,6 +94,22 @@ function buildStaticPage(templateName, outName, label) {
 
 function buildNow()  { buildStaticPage('now.html',  'now.html',  'Mission Control'); }
 function buildHome() { buildStaticPage('home.html', 'home.html', 'Landing'); }
+
+function buildKindMapPage() {
+  const html = renderKindMapPage(buildKindMap({ eventTypes: EVENT_TYPES }), {
+    tokensCss: tokensToCss(),
+    live: false,
+  });
+  const outPath = path.join(CWD, 'kind-map.html');
+  fs.writeFileSync(outPath, html, 'utf8');
+  console.log(`Written: ${outPath}  (${(html.length / 1024).toFixed(0)} KB) — kind map`);
+  const publicDir = path.join(CWD, 'public');
+  if (fs.existsSync(publicDir)) {
+    const pub = path.join(publicDir, 'kind-map.html');
+    fs.writeFileSync(pub, html, 'utf8');
+    console.log(`Written: ${pub}`);
+  }
+}
 
 // ── DAW Builder (dedicated live-pulse pure audio profile builder) ────────────
 function buildDaw() {
@@ -174,7 +193,8 @@ function run() {
   const clusterOverrides = loadClusterOverrides(path.join(CWD, 'cluster-overrides.json'));
 
   const { nodes, edges, timeline, stats, COLOR_TO_INDEX } =
-    buildGraph(data, { minSessions, clusterOverrides });
+    // includeSubagentNodes: data present for UI toggle; display defaults off in client
+    buildGraph(data, { minSessions, clusterOverrides, includeSubagentNodes: true });
 
   console.log(`Graph: ${nodes.length} nodes (${stats.project} project · ${stats.session} session · ${stats.cluster} cluster · ${stats.file} file)`);
   console.log(`Edges: ${edges.length} (${stats.membership} membership · ${stats.bundle} bundle · ${stats.branch} · ${stats.write} write · ${stats.edit} edit · ${stats.read} read)`);
@@ -219,6 +239,7 @@ function run() {
   buildDaw();
   buildNow();
   buildHome();
+  buildKindMapPage();
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) run();

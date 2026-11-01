@@ -20,13 +20,20 @@ import { fileURLToPath }  from 'url';
 
 import { getEnabledHarnesses } from './hooks/registry.mjs';
 import { processWatchFilename } from './surface/watch-handlers.mjs';
+import { createPollWatcher } from './surface/poll-watcher.mjs';
 import { resolveSessionFile, invalidateSessionResolveCache } from './surface/session-resolver.mjs';
 import { createActiveState } from './surface/active-state.mjs';
 import { createHub } from './surface/sse-hub.mjs';
 import { createPulseEmitter } from './surface/pulse-emitter.mjs';
 import { createRebuilder } from './surface/rebuild-orchestrator.mjs';
 import { createRequestHandler } from './surface/http-routes.mjs';
+import { createKindMapStore } from './surface/kind-map-store.mjs';
+import { buildKindMap } from './surface/kind-map-build.mjs';
 import { createTraceService } from './surface/trace-service.mjs';
+import { streamEvents } from './hooks/pulse-map.mjs';
+import { EVENT_TYPES } from './experience/audio/event-registry.mjs';
+import { renderKindMapPage, renderKindMapSnippet } from './experience/kind-map-widget.mjs';
+import { tokensToCss } from './experience/design-tokens.mjs';
 
 const __dirname      = path.dirname(fileURLToPath(import.meta.url));
 const PORT           = parseInt(process.argv.find(a => a.startsWith('--port='))?.split('=')[1] ?? '3333');
@@ -35,6 +42,25 @@ const HTML_PATH      = path.join(__dirname, 'graph.html');
 const DATA_PATH      = path.join(__dirname, 'graph-data.json');
 const ANALYZE_SCRIPT = path.join(__dirname, 'analyze.mjs');
 const BUILD_SCRIPT   = path.join(__dirname, 'build.mjs');
+const VERSION        = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version;
+
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  console.log(`kaaro-sessions ${VERSION}`);
+  process.exit(0);
+}
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log(`kaaro-sessions ${VERSION}
+
+Usage: kaaro-sessions [--port=3333] [--no-open]
+
+Options:
+  --port=<port>  Listen on a custom local port
+  --no-open      Start without opening a browser
+  --version      Print the CLI version
+  --help         Print this help text`);
+  process.exit(0);
+}
 
 // ── SSE clients ───────────────────────────────────────────────────────────────
 
@@ -44,7 +70,10 @@ const hub = createHub();
 // Mission Control active-session state (/api/active + SSE `now`) + pulses.
 
 const activeState = createActiveState();
-const { tailAndPulse } = createPulseEmitter({ hub, activeState });
+const kindMapStore = createKindMapStore({
+  buildBaseline: () => buildKindMap({ local: true, eventTypes: EVENT_TYPES }),
+});
+const { tailAndPulse, primeFile } = createPulseEmitter({ hub, activeState, kindMap: kindMapStore });
 
 // ── Rebuild pipeline ──────────────────────────────────────────────────────────
 
@@ -103,6 +132,19 @@ for (const harness of getEnabledHarnesses()) {
   } catch (e) {
     console.warn(`[${harness.id}] watch unavailable: ${e.message}`);
   }
+  if (harness.watch.pollIntervalMs && fs.existsSync(root)) {
+    for (const subdir of harness.watch.pollRoots || ['.']) {
+      const pollRoot = path.join(root, subdir);
+      createPollWatcher({
+        root: pollRoot,
+        intervalMs: harness.watch.pollIntervalMs,
+        matchLogFile: rel => harness.watch.matchLogFile(path.join(subdir, rel)),
+        onInitial: rel => primeFile(path.join(pollRoot, rel)),
+        onChange: rel => handleWatchEvent(harness.id, root, path.join(subdir, rel)),
+      });
+    }
+    console.log(`Polling [${harness.id}] for missed file notifications`);
+  }
 }
 
 if (!watchCount) {
@@ -130,6 +172,13 @@ const server = http.createServer(createRequestHandler({
   },
   resolveSessionFile,
   buildTrace,
+  kindMapStore,
+  renderKindMapPage: (payload) => renderKindMapPage(payload, {
+    tokensCss: tokensToCss(),
+    live: true,
+    streamEvents: [...streamEvents()],
+  }),
+  renderKindMapSnippet,
 }));
 
 // ── Start ─────────────────────────────────────────────────────────────────────

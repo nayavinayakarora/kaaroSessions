@@ -6,6 +6,7 @@
  */
 
 import { normPath, categorizeBash, BUILTIN_COMMANDS } from './helpers/analyze-helpers.mjs';
+import { isBashToolName } from './action-keys.mjs';
 
 export const FILE_OP_TOOLS = {
   Read: 'read', Write: 'write', Edit: 'edit',
@@ -26,8 +27,9 @@ export const FILE_OP_TOOLS = {
   create_file: 'write',
   insert_edit_into_file: 'edit',
   replace_string_in_file: 'edit',
+  apply_patch: 'edit', // codex — snake_case, real tool name (custom_tool_call)
 };
-const BASH_TOOLS = new Set(['Bash', 'bash', 'run_command', 'Shell']);
+
 
 function filePathFromInput(input = {}) {
   return input.file_path ?? input.path ?? input.AbsolutePath ?? input.TargetFile ?? null;
@@ -201,16 +203,24 @@ export function reduceSession(records, meta) {
         const name = rec.tool || 'unknown';
         if (!session.tools[name]) session.tools[name] = { calls: 0, errors: 0 };
         session.tools[name].calls++;
-        if (name === 'Agent' || name === 'Task') session.subagent_count++;
+        if (name === 'Agent' || name === 'Task' || name === 'spawn_subagent' || name === 'invoke_subagent') session.subagent_count++;
+
 
         const op = FILE_OP_TOOLS[name];
-        const fp = normPath(filePathFromInput(rec.input));
-        if (op && fp) {
-          if (!session.file_ops[fp]) session.file_ops[fp] = { read: 0, write: 0, edit: 0 };
-          session.file_ops[fp][op]++;
+        if (op) {
+          // Most tools touch one path; a multi-file patch (codex apply_patch)
+          // carries input.paths[] instead — credit every path, but the call
+          // itself was still only counted once above.
+          const paths = Array.isArray(rec.input?.paths) ? rec.input.paths : [filePathFromInput(rec.input)];
+          for (const raw of paths) {
+            const fp = normPath(raw);
+            if (!fp) continue;
+            if (!session.file_ops[fp]) session.file_ops[fp] = { read: 0, write: 0, edit: 0 };
+            session.file_ops[fp][op]++;
+          }
         }
 
-        if (BASH_TOOLS.has(name) && rec.input?.command) {
+        if (isBashToolName(name) && rec.input?.command) {
           const cat = categorizeBash(rec.input.command);
           session.bash_categories[cat] = (session.bash_categories[cat] || 0) + 1;
         }

@@ -21,13 +21,13 @@
 
 import { deriveLabel } from './helpers/analyze-helpers.mjs';
 import {
-  CLAUDE_PROJECTS_ROOT, PI_SESSIONS_ROOT, ANTIGRAVITY_BRAIN_ROOT, GROK_SESSIONS_ROOT,
+  CLAUDE_PROJECTS_ROOT, CODEX_HOME_ROOT, PI_SESSIONS_ROOT, ANTIGRAVITY_BRAIN_ROOT, GROK_SESSIONS_ROOT,
   OPENCODE_STORAGE_ROOT, COPILOT_WORKSPACE_STORAGE_ROOT, COMMANDCODE_PROJECTS_ROOT,
 } from './harness-paths.mjs';
 import { deriveGrokProjectId, deriveGrokLabel } from './helpers/grok-helpers.mjs';
 import { copilotWorkspaceLabel } from './helpers/copilot-helpers.mjs';
 import {
-  locateClaudeCodeSession, locatePiSession, locateAntigravitySession, locateGrokSession,
+  locateClaudeCodeSession, locateCodexSession, locatePiSession, locateAntigravitySession, locateGrokSession,
   locateOpencodeSession, locateCopilotSession, locateCommandCodeSession,
 } from './session-locators.mjs';
 import path from 'node:path';
@@ -42,6 +42,7 @@ function readJsonlRecords(filePath) {
   return { records: parseJsonlFile(filePath).records };
 }
 import { recordsToNormalized as ccAdapter }   from './adapters/claude-code.mjs';
+import { recordsToNormalized as codexAdapter } from './adapters/codex.mjs';
 import { recordsToNormalized as piAdapter }   from './adapters/pi.mjs';
 import { recordsToNormalized as agAdapter }   from './adapters/antigravity.mjs';
 import { recordsToNormalized as grokAdapter } from './adapters/grok.mjs';
@@ -50,7 +51,7 @@ import { recordsToNormalized as cpAdapter }   from './adapters/copilot.mjs';
 import { recordsToNormalized as cmdAdapter }  from './adapters/command-code.mjs';
 
 export {
-  PI_SESSIONS_ROOT, ANTIGRAVITY_BRAIN_ROOT, GROK_SESSIONS_ROOT, OPENCODE_STORAGE_ROOT,
+  CODEX_HOME_ROOT, PI_SESSIONS_ROOT, ANTIGRAVITY_BRAIN_ROOT, GROK_SESSIONS_ROOT, OPENCODE_STORAGE_ROOT,
   COPILOT_WORKSPACE_STORAGE_ROOT, COMMANDCODE_PROJECTS_ROOT,
 } from './harness-paths.mjs';
 
@@ -58,7 +59,7 @@ function derivePiLabel(slug) {
   return deriveLabel(slug.replace(/^--/, '').replace(/--$/, ''));
 }
 
-export const HARNESS_IDS = ['claude-code', 'pi', 'antigravity', 'grok', 'opencode', 'copilot', 'command-code'];
+export const HARNESS_IDS = ['claude-code', 'codex', 'pi', 'antigravity', 'grok', 'opencode', 'copilot', 'command-code'];
 
 function opencodeSlug(sessionId) {
   return sessionId.replace(/^ses_/, '').slice(0, 8);
@@ -82,14 +83,36 @@ export const HARNESS_REGISTRY = [
     capabilities: {
       tokens: true, pulse: true, trace: true,
       context_resets: true, ai_title: true, subagent_count: true, branches: true,
+      subagent_tree: true,
       size_proxy: 'tokens_work',
     },
     watch: {
-      matchLogFile: (rel) => rel.replace(/\\/g, '/').endsWith('.jsonl'),
+      matchLogFile: (rel) => {
+        const p = rel.replace(/\\/g, '/');
+        if (p.endsWith('.jsonl')) return true;
+        // Sidechain meta: proj/<parent>/subagents/agent-*.meta.json
+        if (p.endsWith('.meta.json') && p.includes('/subagents/')) return true;
+        return false;
+      },
       ctxFromPath(relPath) {
         const parts = relPath.replace(/\\/g, '/').split('/');
         if (parts.length < 2) return null;
         const project_id = parts[0];
+        // Nested sidechain: proj/<parent>/subagents/agent-*.{jsonl,meta.json} → parent
+        if (parts.length >= 4 && parts[2] === 'subagents') {
+          const parent_id = parts[1];
+          const leaf = parts[3]
+            .replace(/\.meta\.json$/i, '')
+            .replace(/\.jsonl$/i, '')
+            .replace(/^agent-/, '');
+          return {
+            harness: 'claude-code', session_id: parent_id,
+            slug: parent_id.slice(0, 8), project_id,
+            project_label: deriveLabel(project_id),
+            agent_id: leaf,
+          };
+        }
+        if (!parts[1].endsWith('.jsonl')) return null;
         const session_id = parts[1].replace(/\.jsonl$/, '');
         return {
           harness: 'claude-code', session_id,
@@ -99,8 +122,49 @@ export const HARNESS_REGISTRY = [
       },
       rebuildArg(relPath) {
         const parts = relPath.replace(/\\/g, '/').split('/');
-        return parts.length === 2 ? `--session=${parts[0]}/${parts[1]}` : null;
+        if (parts.length === 2 && parts[1].endsWith('.jsonl'))
+          return `--session=${parts[0]}/${parts[1]}`;
+        // Sidechain jsonl or meta → rebuild parent session jsonl
+        if (parts.length >= 4 && parts[2] === 'subagents') {
+          return `--session=${parts[0]}/${parts[1]}.jsonl`;
+        }
+        return null;
       },
+    },
+  },
+  {
+    id: 'codex',
+    label: 'Codex',
+    adapter: codexAdapter,
+    scan: { module: './analyzers/analyze-codex.mjs', export: 'scanCodexSessions' },
+    locateSession: locateCodexSession,
+    readSessionRecords: readJsonlRecords,
+    roots: [CODEX_HOME_ROOT],
+    capabilities: {
+      tokens: true, pulse: true, trace: true, // tokens are output-only (input/cache are per-request context-window snapshots, not per-turn deltas — see docs/CODEX.md)
+      context_resets: false, ai_title: true, subagent_count: false, branches: true,
+      size_proxy: 'tokens_work',
+    },
+    watch: {
+      pollIntervalMs: 1000,
+      pollRoots: ['sessions', 'archived_sessions'],
+      matchLogFile(rel) {
+        const n = rel.replace(/\\/g, '/');
+        return /^(?:sessions\/\d{4}\/\d{2}\/\d{2}|archived_sessions)\/rollout-.*\.jsonl$/.test(n);
+      },
+      ctxFromPath(relPath) {
+        const n = relPath.replace(/\\/g, '/');
+        const file = path.basename(n);
+        const session_id = file.replace(/\.jsonl$/, '').match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i)?.[1];
+        if (!session_id) return null;
+        return {
+          harness: 'codex', session_id,
+          slug: session_id.slice(0, 8),
+          project_id: null,
+          project_label: 'Codex',
+        };
+      },
+      rebuildArg: () => null,
     },
   },
   {
@@ -144,12 +208,12 @@ export const HARNESS_REGISTRY = [
     readSessionRecords: readJsonlRecords,
     roots: [ANTIGRAVITY_BRAIN_ROOT],
     capabilities: {
-      // trace stays false: antigravity NRs carry no assistant text/thinking
-      // blocks, so reconstructed turns are degenerate (tool lists only).
-      tokens: false, pulse: true, trace: false,
-      context_resets: false, ai_title: false, subagent_count: false, branches: false,
+      tokens: false, pulse: true, trace: true,
+      context_resets: true, ai_title: true, subagent_count: true, branches: false,
       size_proxy: 'tool_calls',
     },
+
+
     watch: {
       matchLogFile: (rel) => {
         const n = rel.replace(/\\/g, '/');
@@ -169,7 +233,15 @@ export const HARNESS_REGISTRY = [
           project_label: 'antigravity',
         };
       },
-      rebuildArg: () => null,
+      rebuildArg: (relPath) => {
+        const parts = relPath.replace(/\\/g, '/').split('/');
+        const convIdx = parts.findIndex((p, i) =>
+          parts[i + 1] === '.system_generated' && parts[i + 2] === 'logs'
+        );
+        if (convIdx < 0) return null;
+        return `--session=antigravity/${parts[convIdx]}`;
+      },
+
     },
   },
   {

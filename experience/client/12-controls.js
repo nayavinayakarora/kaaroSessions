@@ -19,6 +19,7 @@ function applyFilters() {
   const showRoFiles = document.getElementById('cb-ro-files').checked;
   const showBranch  = document.getElementById('cb-branch').checked;
   const showReads   = document.getElementById('cb-reads').checked;
+  const showSubs    = document.getElementById('cb-subagents')?.checked ?? false;
   const minSess     = +document.getElementById('sl-min').value;
   BUNDLE_ON = document.getElementById('cb-bundle')?.checked ?? true;
 
@@ -29,6 +30,10 @@ function applyFilters() {
   for (const n of GRAPH.nodes) {
     if (n.type === 'session' && (!sessionMatchesFilters(n, SESSION_FILTERS) || clusterHidden.has(n.id))) hiddenNodes.add(n.id);
     if (n.type === 'cluster' && clusterHidden.has(n.id)) hiddenNodes.add(n.id);
+    // Subagent satellites: default OFF; also hide if parent session is hidden
+    if (n.type === 'subagent') {
+      if (!showSubs || hiddenNodes.has(n.parent_session_id)) hiddenNodes.add(n.id);
+    }
   }
   // Orphan-file mitigation: with bundles collapsed, most file edges vanish —
   // hide files whose every session neighbour is hidden so no orphan cloud floats.
@@ -42,7 +47,8 @@ function applyFilters() {
     }
   }
   nodeSel.attr('display', d => {
-    if (d.type === 'session' || d.type === 'cluster') return hiddenNodes.has(d.id) ? 'none' : null;
+    if (d.type === 'session' || d.type === 'cluster' || d.type === 'subagent')
+      return hiddenNodes.has(d.id) ? 'none' : null;
     if (d.type === 'file') {
       if (!showFiles)                                    { hiddenNodes.add(d.id); return 'none'; }
       if (d.session_count < minSess)                     { hiddenNodes.add(d.id); return 'none'; }
@@ -58,6 +64,7 @@ function applyFilters() {
     if (hiddenNodes.has(src)||hiddenNodes.has(tgt)) return 'none';
     if (e.type==='read'   && !showReads)  return 'none';
     if (e.type==='branch' && !showBranch) return 'none';
+    if (e.type==='spawn'  && !showSubs)   return 'none';
     return null;
   });
   projLabelSel.attr('display', null);
@@ -79,8 +86,9 @@ document.getElementById('cb-ro-files').addEventListener('change', applyFilters);
 document.getElementById('cb-branch').addEventListener('change',   applyFilters);
 document.getElementById('cb-reads').addEventListener('change',    applyFilters);
 document.getElementById('cb-bundle')?.addEventListener('change',  applyFilters);
+document.getElementById('cb-subagents')?.addEventListener('change', applyFilters);
 document.getElementById('cb-group').addEventListener('change', () => {
-  if (currentLayout==='force') { restoreForceLayout(); simulation.alpha(0.3).restart(); }
+  if (isSimLayout()) { restoreForceLayout(); simulation.alpha(0.3).restart(); }
 });
 document.getElementById('sl-min').addEventListener('input', function() {
   document.getElementById('sl-min-val').textContent = this.value; applyFilters();
@@ -149,9 +157,20 @@ buildFilterControls();
 
 // Free layout toggle — projects unpin, co-access clustering (force layout)
 document.getElementById('fp-free')?.addEventListener('change', () => {
-  if (currentLayout === 'force') { restoreForceLayout(); simulation.alpha(0.5).restart(); }
+  if (document.getElementById('fp-free').checked) {
+    const pin = document.getElementById('cb-pin-grid');
+    if (pin) pin.checked = false;
+  }
+  if (isSimLayout()) { restoreForceLayout(); simulation.alpha(0.5).restart(); }
 });
-document.getElementById('btn-shake').addEventListener('click', ()=>{ if(currentLayout==='force') simulation.alpha(.4).restart(); });
+document.getElementById('cb-pin-grid')?.addEventListener('change', () => {
+  if (document.getElementById('cb-pin-grid').checked) {
+    const free = document.getElementById('fp-free');
+    if (free) free.checked = false;
+  }
+  if (isSimLayout()) { restoreForceLayout(); simulation.alpha(0.45).restart(); }
+});
+document.getElementById('btn-shake').addEventListener('click', ()=>{ if(isSimLayout()) simulation.alpha(.4).restart(); });
 document.getElementById('btn-reset').addEventListener('click', ()=>svg.transition().duration(600).call(zoom.transform, initialTransform));
 
 // ── Force physics controls ────────────────────────────────────────────────────
@@ -161,9 +180,52 @@ const FP_DEFAULTS = { 'fp-charge-s': -130, 'fp-charge-f': -55, 'fp-link-m': 125,
   document.getElementById(id)?.addEventListener('input', function() {
     const display = id === 'fp-vdecay' ? (this.value / 100).toFixed(2) : this.value;
     document.getElementById(id + '-val').textContent = display;
-    if (currentLayout === 'force') { restoreForceLayout(); simulation.alpha(0.3).restart(); }
+    if (isSimLayout()) { restoreForceLayout(); simulation.alpha(0.3).restart(); }
   });
 });
+
+function syncRangeLabel(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (id === 'fp-vdecay') {
+    const lab = document.getElementById(id + '-val');
+    if (lab) lab.textContent = (+el.value / 100).toFixed(2);
+  } else if (id === 'arc-min-shared') {
+    const lab = document.getElementById('arc-min-val');
+    if (lab) lab.textContent = el.value;
+  } else if (id === 'arc-max-span') {
+    const v = +el.value;
+    const lab = document.getElementById('arc-span-val');
+    if (lab) lab.textContent = v >= 365 ? 'All' : v + 'd';
+  } else {
+    const lab = document.getElementById(id + '-val');
+    if (lab) lab.textContent = el.value;
+  }
+}
+
+function resetLayoutOptions() {
+  if (!confirmLayoutReset()) return;
+  document.querySelectorAll('#controls input[type="checkbox"]').forEach(el => { el.checked = el.defaultChecked; });
+  document.querySelectorAll('#controls input[type="range"]').forEach(el => {
+    el.value = el.defaultValue;
+    syncRangeLabel(el.id);
+  });
+  document.querySelectorAll('#controls select').forEach(el => {
+    const def = [...el.options].find(o => o.defaultSelected);
+    el.value = def ? def.value : el.options[0]?.value;
+  });
+  document.getElementById('tf-clear')?.click();
+  focusedArcFileId = null;
+  if (currentLayout !== 'force') setLayout('force');
+  else {
+    restoreForceLayout();
+    applyFilters();
+    if (typeof simulation !== 'undefined') simulation.alpha(0.5).restart();
+  }
+  svg.transition().duration(600).call(zoom.transform, initialTransform);
+}
+
+document.getElementById('btn-reset-layout')?.addEventListener('click', resetLayoutOptions);
 
 document.getElementById('btn-reset-physics')?.addEventListener('click', () => {
   for (const [id, val] of Object.entries(FP_DEFAULTS)) {
@@ -173,7 +235,7 @@ document.getElementById('btn-reset-physics')?.addEventListener('click', () => {
     document.getElementById(id + '-val').textContent =
       id === 'fp-vdecay' ? (val / 100).toFixed(2) : val;
   }
-  if (currentLayout === 'force') { restoreForceLayout(); simulation.alpha(0.5).restart(); }
+  if (isSimLayout()) { restoreForceLayout(); simulation.alpha(0.5).restart(); }
 });
 document.getElementById('btn-fit').addEventListener('click', () => {
   if (currentLayout==='swimlane'||currentLayout==='matrix') return;
@@ -240,7 +302,7 @@ function buildTimeline() {
         } else {
           ensureSessionVisible(d.id);
           highlight(d.id); showPanel(node);
-          if(currentLayout==='force'||currentLayout==='arc'){const t=d3.zoomTransform(svg.node()),nx=node.x*t.k+t.x,ny=node.y*t.k+t.y;svg.transition().duration(500).call(zoom.translateBy,(W/2-nx)/t.k,(H/2-ny)/t.k);}
+          if(isSimLayout()||currentLayout==='arc'){const t=d3.zoomTransform(svg.node()),nx=node.x*t.k+t.x,ny=node.y*t.k+t.y;svg.transition().duration(500).call(zoom.translateBy,(W/2-nx)/t.k,(H/2-ny)/t.k);}
         }
       }
     });
@@ -248,8 +310,43 @@ function buildTimeline() {
 
 function toggleWidget(id) {
   const el=document.getElementById(id);
+  if (!el) return;
   const col=el.classList.toggle('collapsed');
-  el.querySelector('.widget-toggle').textContent=col?'+':'−';
+  const t=el.querySelector('.widget-toggle');
+  if (t) t.textContent=col?'+':'−';
+  persistChromeCollapsed();
+}
+
+function chromeWidgetStates() {
+  return [...document.querySelectorAll('.widget')].map(el => el.classList.contains('collapsed'));
+}
+
+function persistChromeCollapsed() {
+  const down = chromeWidgetStates();
+  const allDown = down.length > 0 && down.every(Boolean);
+  try { localStorage.setItem('kaaro-chrome-collapsed', allDown ? '1' : '0'); } catch {}
+}
+
+function applyChromeCollapsed(collapsed) {
+  document.querySelectorAll('.widget').forEach(el => {
+    el.classList.toggle('collapsed', collapsed);
+    const t = el.querySelector('.widget-toggle');
+    if (t) t.textContent = collapsed ? '+' : '−';
+  });
+  try { localStorage.setItem('kaaro-chrome-collapsed', collapsed ? '1' : '0'); } catch {}
+}
+
+function collapseAllChrome() {
+  const collapse = nextChromeCollapsed(chromeWidgetStates());
+  applyChromeCollapsed(collapse);
+  if (collapse) {
+    if (typeof closePanel === 'function') closePanel();
+    document.getElementById('help-panel')?.classList.remove('open');
+    if (typeof window._apClose === 'function') window._apClose();
+    if (typeof window.closeThread === 'function') window.closeThread();
+    selectedId = null;
+    if (currentLayout === 'swimlane') slHighlight(null); else highlight(null);
+  }
 }
 
 // ── Arc-specific controls ─────────────────────────────────────────────────────
@@ -280,6 +377,8 @@ const SHORTCUTS_DEF = [
   { key:'a', label:'A',      desc:'Arc coupling map',     action:()=>setLayout('arc') },
   { key:'m', label:'M',      desc:'Matrix view',          action:()=>setLayout('matrix') },
   { key:'g', label:'G',      desc:'3D force graph',       action:()=>setLayout('3d') },
+  { key:'p', label:'P',      desc:'Hex lattice layout',   action:()=>setLayout(currentLayout==='grid'?'force':'grid') },
+  { key:'h', label:'H',      desc:'Collapse / expand all panels', action:()=>collapseAllChrome() },
 ];
 
 function _loadSCPrefs() {
@@ -304,9 +403,10 @@ function renderHelpPanel() {
     '<div class="help-sep"></div>',
     '<div class="help-row"><span class="help-key">?</span><span class="help-desc">Toggle this panel</span><span class="help-fixed">—</span></div>',
     '<div class="help-row"><span class="help-key">ESC</span><span class="help-desc">Close panel · deselect</span><span class="help-fixed">—</span></div>',
+    '<div class="help-row"><span class="help-key">↺</span><span class="help-desc">Reset layout options (asks first)</span><span class="help-fixed">—</span></div>',
     '<div class="help-sep"></div>',
     '<div class="help-h">◆ MOUSE</div>',
-    '<div class="help-row"><span class="help-key">Drag</span><span class="help-desc">Pan · reposition node (force)</span></div>',
+    '<div class="help-row"><span class="help-key">Drag</span><span class="help-desc">Pan · reposition node (force/lattice snap)</span></div>',
     '<div class="help-row"><span class="help-key">Scroll</span><span class="help-desc">Zoom in / out</span></div>',
     '<div class="help-row"><span class="help-key">Click</span><span class="help-desc">Select and inspect</span></div>',
     '<div class="help-footer" id="help-close">[ CLOSE ]</div>',
@@ -357,3 +457,6 @@ document.addEventListener('keydown', ev => {
 
 buildTimeline();
 nodeSel.call(drag);
+try {
+  if (localStorage.getItem('kaaro-chrome-collapsed') === '1') applyChromeCollapsed(true);
+} catch {}

@@ -19,6 +19,7 @@ window.updateGraph = function(newData) {
   projLabelSel=labelLayer.selectAll('text.pl').data(GRAPH.nodes.filter(n=>n.type==='project'),d=>d.id).join('text').attr('class','pl').attr('text-anchor','middle').attr('fill',d=>d.color).attr('font-size',9).attr('letter-spacing',1).attr('pointer-events','none').text(d=>d.label.toUpperCase());
   LAYOUT_HANDLERS[currentLayout]?.enter?.();
   buildTimeline(); updateStats(); buildFilterControls(); applyFilters();
+  window.refreshGlyphDock?.();
 };
 
 // ── Live status badge + pulse ticker ─────────────────────────────────────────
@@ -128,7 +129,7 @@ if (window.location.protocol==='http:'||window.location.protocol==='https:') {
     context: KAARO_TOKENS.label,
     dim:     KAARO_TOKENS.dim,
   };
-  for (const cogEvent of ['human_turn','compact','permission','mode_shift','tool_error','api_error','chirp','attachment','scaffold']) {
+  for (const cogEvent of LIVE_COGNITION_EVENTS) {
     es.addEventListener(cogEvent, e => {
       try {
         const d = JSON.parse(e.data);
@@ -150,4 +151,8 @@ window.addEventListener('resize',()=>{
   if(currentLayout==='swimlane') renderSwimlane();
   if(currentLayout==='arc')      {computeArcPositions();drawArcDecor();applyStaticPositions();}
   if(currentLayout==='matrix')   renderMatrix();
+  if(isSimLayout()) {
+    restoreForceLayout();
+    if (currentLayout==='grid') window.drawGridDecor?.();
+  }
 });

@@ -8,6 +8,8 @@
   const INST_OPTS = [
     ['harp','Harp'],['bass','Bass'],['bell','Bell'],['flute','Flute'],
     ['bit','Bit'],['pling','Pling'],['snare','Snare'],['kick','Kick'],['hat','Hi-Hat'],
+    ['rimshot','Rimshot'],['clap','Clap'],['shaker','Shaker'],['tom','Tom'],
+    ['woodblock','Woodblock'],['marimba','Marimba'],['buzz','Buzz'],
     ['off','— Off —'],
   ];
 
@@ -33,7 +35,7 @@
     file:    [['read','Read'],['write','Write'],['edit','Edit']],
     system:  [['bash_git','Bash / git'],['bash_run','Bash / run'],['bash_other','Bash / other'],['grep_glob','Grep · Glob']],
     ai:      [['agent','Agent'],['other','Other tools']],
-    context: [['tokens','Tokens'],['words','Words']],
+    context: [['tokens','Tokens'],['words','Words'],['turn_complete','Turn Complete'],['input_required','Input Required']],
   };
 
   // Track which families are expanded
@@ -231,7 +233,7 @@
   window._apPreview = function(key) {
     const name = (window.AUDIO_SETTINGS?.instruments||{})[key]||'harp';
     if (name==='off') return;
-    if (window.previewInstrument) window.previewInstrument(name);
+    if (window.previewInstrument) window.previewInstrument(name, key);
   };
 
   window._apFamPreview = function(famId) {
